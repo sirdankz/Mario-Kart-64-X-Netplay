@@ -1,3 +1,4 @@
+#include "canonical_gameplay.h"
 /* This decomp treats uintptr_t as a pointer type throughout, for N64 segmented
  * addressing. gcc (the Dreamcast toolchain) warns about the resulting implicit
  * conversions; clang 15+ makes them errors. RXDK's C build does not accept
@@ -1581,42 +1582,121 @@ static void compute_collision_triangle_bounds(s16 x1, s16 y1, s16 z1, s16 x2, s1
     *minZ = mnZ;
 }
 
-// Double-precision normal/plane/facing-axis computation (split out of
-// add_collision_triangle to keep f64 work in its own stack frame).
-// Returns 0 for a degenerate (zero-area) triangle, 1 otherwise.
-static s32 compute_collision_triangle_normal(s16 x1, s16 y1, s16 z1, s16 x2, s16 y2, s16 z2, s16 x3, s16 y3, s16 z3,
-                                             f32* normalX, f32* normalY, f32* normalZ, f32* distance, u16* facingFlag) {
-    f64 crossProductX = (((y2 - y1) * (z3 - z2)) - ((z2 - z1) * (y3 - y2)));
-    f64 crossProductY = (((z2 - z1) * (x3 - x2)) - ((x2 - x1) * (z3 - z2)));
-    f64 crossProductZ = (((x2 - x1) * (y3 - y2)) - ((y2 - y1) * (x3 - x2)));
 
-    // length of the cross product
-    f64 magnitude =
-        sqrtf((crossProductX * crossProductX) + (crossProductY * crossProductY) + (crossProductZ * crossProductZ));
+/* R31 cross-platform collision determinism.
+ *
+ * The original expression computes the cross-product terms as promoted C int
+ * before assigning them to f64.  Large s16 coordinate differences can overflow
+ * signed 32-bit int (undefined behavior), and the subsequent f64/sqrtf path can
+ * round differently on x86 and PPC.  Keep the geometry exact in s64, then force
+ * every normalization operation through binary32 boundaries shared by both
+ * ports.  The square root is a fixed-iteration binary32 Newton step, avoiding
+ * platform libm/intrinsic differences. */
+typedef union R31FloatBits {
+    f32 f;
+    u32 u;
+} R31FloatBits;
 
-    if (!magnitude) {
+static f32 r31_force_s64_to_f32(s64 value) {
+    volatile f32 result = (f32) value;
+    return result;
+}
+
+static f32 r31_canonical_sqrtf_positive(f32 value) {
+    R31FloatBits bits;
+    f32 estimate;
+    s32 i;
+
+    if (!(value > 0.0f)) {
+        return 0.0f;
+    }
+
+    /* Deterministic exponent-based starting estimate, followed by six
+     * explicitly rounded Newton iterations: y = 0.5 * (y + x / y). */
+    bits.f = value;
+    bits.u = (bits.u >> 1) + 0x1FC00000U;
+    estimate = bits.f;
+
+    for (i = 0; i < 6; i++) {
+        estimate = mk64_f32_mul(
+            0.5f,
+            mk64_f32_add(estimate, mk64_f32_div(value, estimate)));
+    }
+    return estimate;
+}
+
+static s64 r31_abs_s64(s64 value) {
+    return (value < 0) ? -value : value;
+}
+
+static s32 r31_compute_collision_triangle_normal(
+    s16 x1, s16 y1, s16 z1,
+    s16 x2, s16 y2, s16 z2,
+    s16 x3, s16 y3, s16 z3,
+    f32* normalX, f32* normalY, f32* normalZ,
+    f32* distance, u16* facingFlag) {
+    s64 crossX;
+    s64 crossY;
+    s64 crossZ;
+    s64 absX;
+    s64 absY;
+    s64 absZ;
+    f32 crossXF;
+    f32 crossYF;
+    f32 crossZF;
+    f32 squareX;
+    f32 squareY;
+    f32 squareZ;
+    f32 magnitudeSquared;
+    f32 magnitude;
+    f32 planeX;
+    f32 planeY;
+    f32 planeZ;
+
+    crossX = ((s64) (y2 - y1) * (s64) (z3 - z2)) -
+             ((s64) (z2 - z1) * (s64) (y3 - y2));
+    crossY = ((s64) (z2 - z1) * (s64) (x3 - x2)) -
+             ((s64) (x2 - x1) * (s64) (z3 - z2));
+    crossZ = ((s64) (x2 - x1) * (s64) (y3 - y2)) -
+             ((s64) (y2 - y1) * (s64) (x3 - x2));
+
+    if ((crossX == 0) && (crossY == 0) && (crossZ == 0)) {
         return 0;
     }
 
-    *normalX = (f32) crossProductX / magnitude;
-    *normalY = (f32) crossProductY / magnitude;
-    *normalZ = (f32) crossProductZ / magnitude;
+    crossXF = r31_force_s64_to_f32(crossX);
+    crossYF = r31_force_s64_to_f32(crossY);
+    crossZF = r31_force_s64_to_f32(crossZ);
 
-    // Distance from x to plane (cross product's normal).
-    *distance = -((*normalX * x1) + (*normalY * y1) + (*normalZ * z1));
+    squareX = mk64_f32_mul(crossXF, crossXF);
+    squareY = mk64_f32_mul(crossYF, crossYF);
+    squareZ = mk64_f32_mul(crossZF, crossZF);
+    magnitudeSquared = mk64_f32_add(mk64_f32_add(squareX, squareY), squareZ);
+    magnitude = r31_canonical_sqrtf_positive(magnitudeSquared);
+    if (!(magnitude > 0.0f)) {
+        return 0;
+    }
 
-    // Square the crossProduct to produce a magnitude
-    crossProductX = crossProductX * crossProductX;
-    crossProductY = crossProductY * crossProductY;
-    crossProductZ = crossProductZ * crossProductZ;
+    *normalX = mk64_f32_div(crossXF, magnitude);
+    *normalY = mk64_f32_div(crossYF, magnitude);
+    *normalZ = mk64_f32_div(crossZF, magnitude);
 
-    // Find the axis with the highest magnitude.
-    if ((crossProductX <= crossProductY) && (crossProductY >= crossProductZ)) {
-        *facingFlag = FACING_Y_AXIS; // Y is the significant axis
-    } else if ((crossProductX > crossProductY) && (crossProductX >= crossProductZ)) {
-        *facingFlag = FACING_X_AXIS; // X is the significant axis
+    planeX = mk64_f32_mul(*normalX, (f32) x1);
+    planeY = mk64_f32_mul(*normalY, (f32) y1);
+    planeZ = mk64_f32_mul(*normalZ, (f32) z1);
+    *distance = -mk64_f32_add(mk64_f32_add(planeX, planeY), planeZ);
+
+    /* Squaring is unnecessary for selecting the dominant axis.  Comparing
+     * absolute exact s64 cross components is equivalent and deterministic. */
+    absX = r31_abs_s64(crossX);
+    absY = r31_abs_s64(crossY);
+    absZ = r31_abs_s64(crossZ);
+    if ((absX <= absY) && (absY >= absZ)) {
+        *facingFlag = FACING_Y_AXIS;
+    } else if ((absX > absY) && (absX >= absZ)) {
+        *facingFlag = FACING_X_AXIS;
     } else {
-        *facingFlag = FACING_Z_AXIS; // Z is the significant axis
+        *facingFlag = FACING_Z_AXIS;
     }
 
     return 1;
@@ -1686,7 +1766,7 @@ void add_collision_triangle(Vtx* vtx1, Vtx* vtx2, Vtx* vtx3, s8 surfaceType, u16
 
     compute_collision_triangle_bounds(x1, y1, z1, x2, y2, z2, x3, y3, z3, &maxX, &maxZ, &maxY, &minX, &minY, &minZ);
 
-    if (!compute_collision_triangle_normal(x1, y1, z1, x2, y2, z2, x3, y3, z3, &normalX, &normalY, &normalZ, &distance,
+    if (!r31_compute_collision_triangle_normal(x1, y1, z1, x2, y2, z2, x3, y3, z3, &normalX, &normalY, &normalZ, &distance,
                                            &facingFlag)) {
         return;
     }

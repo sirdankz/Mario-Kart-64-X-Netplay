@@ -34,7 +34,7 @@
     <RxdkBuildFlavor>Debug</RxdkBuildFlavor>
     <RxdkDefines>TARGET_XBOX=1;NON_MATCHING=1;VERSION_US=1;F3DEX_GBI=1;F3D_OLD=1;_LANGUAGE_C=1;_FINALROM=1;SINCOSS_USE_FSCA=0</RxdkDefines>
     <RxdkIncludePaths>Platform\xbox;include;src;src\gfx;src\racing;src\ending;.</RxdkIncludePaths>
-    <RxdkLibraries>libd3d8;libd3dx8;libxgraphics;libdsound;libxapi;libc;libcpp;libkernel</RxdkLibraries>
+    <RxdkLibraries>libd3d8;libd3dx8;libxgraphics;libdsound;libxapi;libxnet;libc;libcpp;libkernel</RxdkLibraries>
     <RxdkCppStandard>c++23</RxdkCppStandard>
     <RxdkExceptions>false</RxdkExceptions>
     <RxdkDeployPaths>dc_data</RxdkDeployPaths>
@@ -55,7 +55,7 @@
     <RxdkReleaseOptimize>ReleaseFast</RxdkReleaseOptimize>
     <RxdkDefines>TARGET_XBOX=1;NON_MATCHING=1;VERSION_US=1;F3DEX_GBI=1;F3D_OLD=1;_LANGUAGE_C=1;_FINALROM=1;SINCOSS_USE_FSCA=0</RxdkDefines>
     <RxdkIncludePaths>Platform\xbox;include;src;src\gfx;src\racing;src\ending;.</RxdkIncludePaths>
-    <RxdkLibraries>libd3d8;libd3dx8;libxgraphics;libdsound;libxapi;libc;libcpp;libkernel</RxdkLibraries>
+    <RxdkLibraries>libd3d8;libd3dx8;libxgraphics;libdsound;libxapi;libxnet;libc;libcpp;libkernel</RxdkLibraries>
     <RxdkCppStandard>c++23</RxdkCppStandard>
     <RxdkExceptions>false</RxdkExceptions>
     <RxdkDeployPaths>dc_data</RxdkDeployPaths>
@@ -268,6 +268,7 @@
     <ClCompile Include="Platform\xbox\kos_xbox.c" />
     <ClCompile Include="src\staff_ghosts.c" />
     <ClCompile Include="Platform\xbox\xbox_savegame.c" />
+    <ClCompile Include="Platform\xbox\xbox_netplay.cpp" />
     <ClCompile Include="Platform\xbox\stubs_xbox.c" />
     <ClCompile Include="courses\staff_ghost_data.c" />
     <ClCompile Include="Platform\xbox\gen_seg\ceremony_data_blob.c" />

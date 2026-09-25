@@ -48,6 +48,7 @@
 #include "save.h"             /* -> PR/os.h */
 #include "save_data.h"
 #include "xbox_debug.h"
+#include "xbox_netplay.h"
 
 #define EEPROM_FILE     "mk64.eep"
 #define GHOST_FILE      "mk64.gho"
@@ -58,6 +59,19 @@
 extern SaveData gSaveData;
 extern s32 D_800DC5AC;
 void func_800B46D0(void);
+
+/* Match the Xbox 360 online-save contract exactly: netplay starts from a
+ * neutral in-memory 4Kbit EEPROM and never reads or mutates the console's
+ * persistent save.  This keeps unlocks/options/records from steering peers
+ * down different menu paths. */
+static unsigned char sOnlineEeprom[EEPROM_BYTES];
+static int sOnlineEepromReady = 0;
+static void online_eeprom_init(void) {
+    if (!sOnlineEepromReady) {
+        memset(sOnlineEeprom, 0xFF, sizeof(sOnlineEeprom));
+        sOnlineEepromReady = 1;
+    }
+}
 
 /* kos_xbox.c: the save container's directory, ending in a backslash, or NULL
  * if it could not be created. */
@@ -120,6 +134,10 @@ static FILE *save_open(const char *name, size_t size, const char *mode) {
 /* --------------------------------------------------------------- EEPROM --- */
 
 s32 osEepromProbe(UNUSED OSMesgQueue *mq) {
+    if (xbox_netplay_active()) {
+        online_eeprom_init();
+        return EEPROM_TYPE_4K;
+    }
     char path[SAVE_PATH_MAX];
     int fresh;
     FILE *f;
@@ -159,6 +177,11 @@ s32 osEepromLongRead(UNUSED OSMesgQueue *mq, unsigned char address, unsigned cha
     if (length <= 0 || off < 0 || off + length > EEPROM_BYTES) {
         return 1;
     }
+    if (xbox_netplay_active()) {
+        online_eeprom_init();
+        memcpy(buffer, sOnlineEeprom + off, (size_t)length);
+        return 0;
+    }
     f = save_open(EEPROM_FILE, EEPROM_BYTES, "rb");
     if (!f) {
         return 1;
@@ -184,6 +207,11 @@ s32 osEepromLongWrite(UNUSED OSMesgQueue *mq, unsigned char address, unsigned ch
 
     if (length <= 0 || off < 0 || off + length > EEPROM_BYTES) {
         return 1;
+    }
+    if (xbox_netplay_active()) {
+        online_eeprom_init();
+        memcpy(sOnlineEeprom + off, buffer, (size_t)length);
+        return 0;
     }
     f = save_open(EEPROM_FILE, EEPROM_BYTES, "r+b");
     if (!f) {
@@ -214,11 +242,13 @@ static OSPfsState sGhostState;
 static int        sGhostAllocated = 0;
 
 s32 osPfsIsPlug(UNUSED OSMesgQueue *queue, u8 *pattern) {
+    if (xbox_netplay_active()) { *pattern = 0; return 0; }
     *pattern = save_dir_ready() ? 1 : 0;
     return 0;
 }
 
 s32 osPfsInit(UNUSED OSMesgQueue *queue, OSPfs *pfs, int channel) {
+    if (xbox_netplay_active()) return PFS_NO_PAK_INSERTED;
     if (channel != 0 || !save_dir_ready()) {
         return PFS_NO_PAK_INSERTED;
     }
@@ -229,12 +259,14 @@ s32 osPfsInit(UNUSED OSMesgQueue *queue, OSPfs *pfs, int channel) {
 }
 
 s32 osPfsNumFiles(UNUSED OSPfs *pfs, s32 *max_files, s32 *files_used) {
+    if (xbox_netplay_active()) { if(max_files)*max_files=0; if(files_used)*files_used=0; return PFS_ERR_NOPACK; }
     *max_files  = 1;
     *files_used = sGhostAllocated ? 1 : 0;
     return PFS_NO_ERROR;
 }
 
 s32 osPfsFileState(UNUSED OSPfs *pfs, UNUSED s32 file_no, OSPfsState *state) {
+    if (xbox_netplay_active()) return PFS_ERR_NOPACK;
     if (state) {
         *state = sGhostState;
     }
@@ -242,6 +274,7 @@ s32 osPfsFileState(UNUSED OSPfs *pfs, UNUSED s32 file_no, OSPfsState *state) {
 }
 
 s32 osPfsFreeBlocks(UNUSED OSPfs *pfs, s32 *bytes_not_used) {
+    if (xbox_netplay_active()) { if(bytes_not_used)*bytes_not_used=0; return PFS_ERR_NOPACK; }
     /* Plenty: this is a hard drive. The value only gates the game's "not
      * enough space" message. */
     *bytes_not_used = GHOST_BYTES * 4;
@@ -250,6 +283,7 @@ s32 osPfsFreeBlocks(UNUSED OSPfs *pfs, s32 *bytes_not_used) {
 
 s32 osPfsAllocateFile(UNUSED OSPfs *pfs, u16 company_code, u32 game_code, u8 *game_name,
                       u8 *ext_name, UNUSED int file_size_in_bytes, s32 *file_no) {
+    if (xbox_netplay_active()) return PFS_ERR_NOPACK;
     FILE *f = save_open(GHOST_FILE, GHOST_BYTES, "r+b");
     if (!f) {
         return PFS_NO_PAK_INSERTED;
@@ -272,6 +306,7 @@ s32 osPfsAllocateFile(UNUSED OSPfs *pfs, u16 company_code, u32 game_code, u8 *ga
 
 s32 osPfsFindFile(UNUSED OSPfs *pfs, u16 company_code, u32 game_code, u8 *game_name,
                   u8 *ext_name, s32 *file_no) {
+    if (xbox_netplay_active()) return PFS_ERR_NOPACK;
     char path[SAVE_PATH_MAX];
     FILE *f;
 
@@ -301,6 +336,7 @@ s32 osPfsFindFile(UNUSED OSPfs *pfs, u16 company_code, u32 game_code, u8 *game_n
 
 s32 osPfsReadWriteFile(UNUSED OSPfs *pfs, UNUSED s32 file_no, u8 flag, int offset,
                        int size_in_bytes, u8 *data_buffer) {
+    if (xbox_netplay_active()) return PFS_ERR_NOPACK;
     FILE *f;
     size_t done;
 
@@ -328,6 +364,7 @@ s32 osPfsReadWriteFile(UNUSED OSPfs *pfs, UNUSED s32 file_no, u8 flag, int offse
 
 s32 osPfsDeleteFile(UNUSED OSPfs *pfs, UNUSED u16 company_code, UNUSED u32 game_code,
                     UNUSED u8 *game_name, UNUSED u8 *ext_name) {
+    if (xbox_netplay_active()) return PFS_ERR_NOPACK;
     char path[SAVE_PATH_MAX];
 
     if (!save_path(GHOST_FILE, path, sizeof(path))) {

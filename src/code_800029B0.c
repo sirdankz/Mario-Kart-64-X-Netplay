@@ -24,6 +24,10 @@
 #include "menus.h"
 #include "data/other_textures.h"
 
+#if defined(TARGET_XBOX)
+extern void xbox_netplay_trace(const char *fmt, ...);
+#endif
+
 extern s32 gDemoTimer;
 extern s16 D_802BA048;
 s16 gCurrentCourseId = 0;
@@ -178,8 +182,17 @@ void func_800029B0(void) {
 void setup_race(void) {
     struct Controller* controller;
     int i;
-
+#if defined(TARGET_XBOX)
+    xbox_netplay_trace("R12_SETUP 00 ENTER gs=%d next=%d course=%d loaded=%d mode=%d cc=%d pc=%d smSel=%d activeSM=%d\n",
+                       (int)gGamestate, (int)gGamestateNext, (int)gCurrentCourseId, (int)gCurrentlyLoadedCourseId,
+                       (int)gModeSelection, (int)gCCSelection, (int)gPlayerCount,
+                       (int)gScreenModeSelection, (int)gActiveScreenMode);
+    xbox_netplay_trace("R12_SETUP 01 PRE nuke_everything\n");
+#endif
     nuke_everything();
+#if defined(TARGET_XBOX)
+    xbox_netplay_trace("R12_SETUP 02 POST nuke_everything\n");
+#endif
     must_inval_bg = 1;
 
     gPlayerCountSelection1 = gPlayerCount;
@@ -195,26 +208,69 @@ void setup_race(void) {
         gCurrentCourseId = gCupCourseOrder[gCupSelection][gCourseIndexInCup];
     }
     gActiveScreenMode = gScreenModeSelection;
+#if defined(TARGET_XBOX)
+    xbox_netplay_trace("R12_SETUP 03 SCREEN activeSM=%d pcSel=%d course=%d loaded=%d\n",
+                       (int)gActiveScreenMode, (int)gPlayerCountSelection1, (int)gCurrentCourseId, (int)gCurrentlyLoadedCourseId);
+#endif
     if (gCurrentCourseId != gCurrentlyLoadedCourseId) {
         D_80150120 = 0;
         gCurrentlyLoadedCourseId = gCurrentCourseId;
+#if defined(TARGET_XBOX)
+        xbox_netplay_trace("R12_SETUP 04 PRE load_course course=%d\n", (int)gCurrentCourseId);
+#endif
         load_course(gCurrentCourseId);
+#if defined(TARGET_XBOX)
+        xbox_netplay_trace("R12_SETUP 05 POST load_course PRE collision_mesh\n");
+#endif
         course_generate_collision_mesh();
+#if defined(TARGET_XBOX)
+        xbox_netplay_trace("R12_SETUP 06 POST collision_mesh\n");
+#endif
     }
+#if defined(TARGET_XBOX)
+    xbox_netplay_trace("R12_SETUP 07 PRE func_802969F8\n");
+#endif
     func_802969F8();
+#if defined(TARGET_XBOX)
+    xbox_netplay_trace("R12_SETUP 08 POST func_802969F8 PRE staffghost\n");
+#endif
     func_80005310();
+#if defined(TARGET_XBOX)
+    xbox_netplay_trace("R12_SETUP 09 POST staffghost PRE spawn/camera func_8003D080\n");
+#endif
     func_8003D080();
+#if defined(TARGET_XBOX)
+    xbox_netplay_trace("R12_SETUP 10 POST func_8003D080 PRE init_hud\n");
+#endif
     init_hud();
+#if defined(TARGET_XBOX)
+    xbox_netplay_trace("R12_SETUP 11 POST init_hud\n");
+#endif
     D_800DC510 = 0;
     gNumSpawnedShells = 0;
     D_800DC5B8 = 0;
     D_80152308 = 0;
     gDemoTimer = -1;
     D_802BA048 = 0;
+#if defined(TARGET_XBOX)
+    xbox_netplay_trace("R12_SETUP 12 PRE func_802A74BC\n");
+#endif
     func_802A74BC();
+#if defined(TARGET_XBOX)
+    xbox_netplay_trace("R12_SETUP 13 POST func_802A74BC PRE perspective\n");
+#endif
     set_perspective_and_aspect_ratio();
+#if defined(TARGET_XBOX)
+    xbox_netplay_trace("R12_SETUP 14 POST perspective PRE func_80091FA4\n");
+#endif
     func_80091FA4();
+#if defined(TARGET_XBOX)
+    xbox_netplay_trace("R12_SETUP 15 POST func_80091FA4 PRE actors/textures\n");
+#endif
     init_actors_and_load_textures();
+#if defined(TARGET_XBOX)
+    xbox_netplay_trace("R12_SETUP 16 POST actors/textures\n");
+#endif
     if (gModeSelection != BATTLE) {
         D_8015F8D0[1] = (f32) (gCurrentTrackPath->posY - 15);
         D_8015F8D0[2] = gCurrentTrackPath->posZ;
@@ -227,12 +283,21 @@ void setup_race(void) {
         }
     }
     if (!gDemoMode) {
+#if defined(TARGET_XBOX)
+        xbox_netplay_trace("R12_SETUP 17 PRE audio race cfg\n");
+#endif
         func_800CA008(gPlayerCountSelection1 - 1, gCurrentCourseId + 4);
         func_800CB2C4();
+#if defined(TARGET_XBOX)
+        xbox_netplay_trace("R12_SETUP 18 POST audio race cfg\n");
+#endif
     }
 
     controller = gControllerOne;
 
+#if defined(TARGET_XBOX)
+    xbox_netplay_trace("R12_SETUP 19 PRE controller clear\n");
+#endif
     for (i = 0; i < 7; i++, controller++) {
         controller->rawStickX = 0;
         controller->rawStickY = 0;
@@ -240,6 +305,12 @@ void setup_race(void) {
         controller->buttonDepressed = 0;
         controller->button = 0;
     }
+#if defined(TARGET_XBOX)
+    xbox_netplay_trace("R12_SETUP 20 EXIT rs=%u activeSM=%d course=%d p1=(%.2f,%.2f,%.2f) p2=(%.2f,%.2f,%.2f)\n",
+                       (unsigned)D_800DC510, (int)gActiveScreenMode, (int)gCurrentCourseId,
+                       gPlayers[0].pos[0], gPlayers[0].pos[1], gPlayers[0].pos[2],
+                       gPlayers[1].pos[0], gPlayers[1].pos[1], gPlayers[1].pos[2]);
+#endif
 }
 
 // sound related

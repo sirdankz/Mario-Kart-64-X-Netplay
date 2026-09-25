@@ -26,6 +26,30 @@
 #include "courses/all_course_data.h"
 #include "courses/all_course_packed.h"
 #include "courses/all_course_offsets.h"
+
+#if defined(TARGET_XBOX)
+/* MK64 R39 OG local-fullscreen jumbotron parity.
+ *
+ * R33/R37 intentionally keep gActiveScreenMode in multiplayer mode for
+ * deterministic simulation, while presenting exactly one local camera as
+ * fullscreen. The original course code chooses a separate split-screen
+ * framebuffer capture path whenever gActiveScreenMode != SCREEN_MODE_1P.
+ *
+ * For one-local-player Xbox netplay, the DISPLAY is 1P-like even though the
+ * synchronized game mode remains multiplayer. Use the native 1P live-feed
+ * capture path only for presentation. No gameplay/camera/netplay state changes.
+ */
+extern int xbox_netplay_active(void);
+extern int xbox_netplay_local_count(void);
+
+static int xbox_local_fullscreen_jumbotron(void) {
+    return xbox_netplay_active() && xbox_netplay_local_count() == 1;
+}
+#else
+static int xbox_local_fullscreen_jumbotron(void) {
+    return 0;
+}
+#endif
 #if defined(TARGET_XBOX)
 #include "xbox_debug.h"
 #else
@@ -972,10 +996,14 @@ void render_luigi_raceway(struct UnkStruct_800DC5EC* arg0) {
     D_800DC5E0 = 72;
 
     // Render only the first player camera onto the television billboard. Screen agnostic screens of other players).
-    if ((gActiveScreenMode != SCREEN_MODE_1P) && (sp22 >= 10) && (sp22 < 17)) {
+    if ((gActiveScreenMode != SCREEN_MODE_1P) &&
+        !xbox_local_fullscreen_jumbotron() &&
+        (sp22 >= 10) && (sp22 < 17)) {
         luigi_jumbotron();
     }
-    if ((gActiveScreenMode == SCREEN_MODE_1P) && (sp22 >= 10) && (sp22 < 17)) {
+    if (((gActiveScreenMode == SCREEN_MODE_1P) ||
+         xbox_local_fullscreen_jumbotron()) &&
+        (sp22 >= 10) && (sp22 < 17)) {
 #if JUMBOTRON_ALL_SECTIONS_PER_FRAME
         prevFrame = (s16) sRenderedFramebuffer - 1;
 
@@ -1256,10 +1284,12 @@ void render_wario_stadium(struct UnkStruct_800DC5EC* arg0) {
 
     D_800DC5DC = 88;
     D_800DC5E0 = 72;
-    if (gActiveScreenMode != SCREEN_MODE_1P) {
+    if ((gActiveScreenMode != SCREEN_MODE_1P) &&
+        !xbox_local_fullscreen_jumbotron()) {
         wario_jumbotron();
     }
-    else if (gActiveScreenMode == SCREEN_MODE_1P) {
+    else if ((gActiveScreenMode == SCREEN_MODE_1P) ||
+             xbox_local_fullscreen_jumbotron()) {
 #if JUMBOTRON_ALL_SECTIONS_PER_FRAME
         prevFrame = (s16) sRenderedFramebuffer - 1;
         if (prevFrame < 0) {

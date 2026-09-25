@@ -1,3 +1,4 @@
+#include "canonical_gameplay.h"
 #include <ultra64.h>
 #include <sincoss.h>
 #include <macros.h>
@@ -188,6 +189,9 @@ s16** cpu_forTwoPlayer[] = { gListCPUforMario, gListCPUforLuigi, gListCPUforYosh
                              gListCPUforDk,    gListCPUforWario, gListCPUforPeach, gListCPUforBowser };
 
 // func_80027D00
+
+/* R26A speed-square helper is shared in canonical_gameplay.h (R27). */
+
 s32 get_player_index_for_player(Player* player) {
     s32 index;
 
@@ -2635,8 +2639,8 @@ void control_cpu_movement(Player* player, UNUSED Camera* camera, s8 arg2, s8 pla
     sp68[0] = player->velocity[0];
     sp68[1] = 0;
     sp68[2] = player->velocity[2];
-    sp68[0] += (((spF4[0] + sp84) + spD0[0]) - (sp68[0] * (0.12 * player->kartFriction))) / 6000.0;
-    sp68[2] += (((spF4[2] + sp7C) + spD0[2]) - (sp68[2] * (0.12 * player->kartFriction))) / 6000.0;
+    sp68[0] = mk64_canonical_cpu_velocity(sp68[0], (spF4[0] + sp84) + spD0[0], player->kartFriction);
+    sp68[2] = mk64_canonical_cpu_velocity(sp68[2], (spF4[2] + sp7C) + spD0[2], player->kartFriction);
     player->oldPos[0] = player->pos[0];
     player->oldPos[1] = test;
     player->oldPos[2] = player->pos[2];
@@ -2836,13 +2840,13 @@ void func_8002FE84(Player* player, f32 arg1) {
     s32 test;
 
     if ((player->effects & 0x4000) == 0x4000) {
-        player->unk_098 = ((player->currentSpeed * player->currentSpeed) / 25.0f) * 1.1;
+        player->unk_098 = (mk64_canonical_speed_square_div25(player->currentSpeed)) * 1.1;
         return;
     }
 
     // Huh?
     if (((player->effects & 0xFFFFFFFF) & 8) == 8) {
-        player->unk_098 = ((player->currentSpeed * player->currentSpeed) / 25.0f) * 1.1;
+        player->unk_098 = (mk64_canonical_speed_square_div25(player->currentSpeed)) * 1.1;
         return;
     }
 
@@ -2872,7 +2876,7 @@ void func_8002FE84(Player* player, f32 arg1) {
     player->unk_098 = arg1 * (1.0 + (var_f0 * 0.7));
     if ((player->effects & 0x20) == 0x20) {
         temp_f0_3 = player->currentSpeed + 180.0f;
-        player->unk_098 = (temp_f0_3 * temp_f0_3) / 25.0f;
+        player->unk_098 = mk64_canonical_speed_square_div25(temp_f0_3);
     }
 }
 
@@ -3191,95 +3195,105 @@ void player_accelerate(Player* player) {
     player_index = get_player_index_for_player(player);
     if (gIsPlayerTripleAButtonCombo[player_index] == 0) {
         if ((0.0 <= player->currentSpeed) && (player->currentSpeed < (player->topSpeed * 0.1))) {
-            player->currentSpeed +=
-                gKartAccelerationTables[player->characterId][0] + (0.05 * (player->slopeAccel / 182));
+            player->currentSpeed = mk64_canonical_accel_step(player->currentSpeed,
+                gKartAccelerationTables[player->characterId][0], player->slopeAccel,
+                1.0f, 0);
         }
         if (((player->topSpeed * 0.1) <= player->currentSpeed) && (player->currentSpeed < (player->topSpeed * 0.2))) {
-            player->currentSpeed +=
-                gKartAccelerationTables[player->characterId][1] + (0.05 * (player->slopeAccel / 182));
+            player->currentSpeed = mk64_canonical_accel_step(player->currentSpeed,
+                gKartAccelerationTables[player->characterId][1], player->slopeAccel,
+                1.0f, 0);
         }
         if (((player->topSpeed * 0.2) <= player->currentSpeed) && (player->currentSpeed < (player->topSpeed * 0.3))) {
-            player->currentSpeed +=
-                gKartAccelerationTables[player->characterId][2] + (0.05 * (player->slopeAccel / 182));
+            player->currentSpeed = mk64_canonical_accel_step(player->currentSpeed,
+                gKartAccelerationTables[player->characterId][2], player->slopeAccel,
+                1.0f, 0);
         }
         if (((player->topSpeed * 0.3) <= player->currentSpeed) && (player->currentSpeed < (player->topSpeed * 0.4))) {
-            player->currentSpeed +=
-                gKartAccelerationTables[player->characterId][3] + (0.05 * (player->slopeAccel / 182));
+            player->currentSpeed = mk64_canonical_accel_step(player->currentSpeed,
+                gKartAccelerationTables[player->characterId][3], player->slopeAccel,
+                1.0f, 0);
         }
         if (((player->topSpeed * 0.4) <= player->currentSpeed) && (player->currentSpeed < (player->topSpeed * 0.5))) {
-            player->currentSpeed +=
-                gKartAccelerationTables[player->characterId][4] + (0.05 * (player->slopeAccel / 182));
+            player->currentSpeed = mk64_canonical_accel_step(player->currentSpeed,
+                gKartAccelerationTables[player->characterId][4], player->slopeAccel,
+                1.0f, 0);
         }
         if (((player->topSpeed * 0.5) <= player->currentSpeed) && (player->currentSpeed < (player->topSpeed * 0.6))) {
-            player->currentSpeed +=
-                gKartAccelerationTables[player->characterId][5] + (0.05 * (player->slopeAccel / 182));
+            player->currentSpeed = mk64_canonical_accel_step(player->currentSpeed,
+                gKartAccelerationTables[player->characterId][5], player->slopeAccel,
+                1.0f, 0);
         }
         if (((player->topSpeed * 0.6) <= player->currentSpeed) && (player->currentSpeed < (player->topSpeed * 0.7))) {
-            player->currentSpeed +=
-                gKartAccelerationTables[player->characterId][6] + (0.05 * (player->slopeAccel / 182));
+            player->currentSpeed = mk64_canonical_accel_step(player->currentSpeed,
+                gKartAccelerationTables[player->characterId][6], player->slopeAccel,
+                1.0f, 0);
         }
         if (((player->topSpeed * 0.7) <= player->currentSpeed) && (player->currentSpeed < (player->topSpeed * 0.8))) {
-            player->currentSpeed +=
-                gKartAccelerationTables[player->characterId][7] + (0.05 * (player->slopeAccel / 182));
+            player->currentSpeed = mk64_canonical_accel_step(player->currentSpeed,
+                gKartAccelerationTables[player->characterId][7], player->slopeAccel,
+                1.0f, 0);
         }
         if (((player->topSpeed * 0.8) <= player->currentSpeed) && (player->currentSpeed < (player->topSpeed * 0.9))) {
-            player->currentSpeed +=
-                gKartAccelerationTables[player->characterId][8] + (0.05 * (player->slopeAccel / 182));
+            player->currentSpeed = mk64_canonical_accel_step(player->currentSpeed,
+                gKartAccelerationTables[player->characterId][8], player->slopeAccel,
+                1.0f, 0);
         }
         if (((player->topSpeed * 0.9) <= player->currentSpeed) && (player->currentSpeed <= (player->topSpeed * 1.0))) {
-            player->currentSpeed +=
-                gKartAccelerationTables[player->characterId][9] + (0.05 * (player->slopeAccel / 182));
+            player->currentSpeed = mk64_canonical_accel_step(player->currentSpeed,
+                gKartAccelerationTables[player->characterId][9], player->slopeAccel,
+                1.0f, 0);
         }
     } else {
         if ((0.0 <= player->currentSpeed) && (player->currentSpeed < (player->topSpeed * 0.1))) {
-            player->currentSpeed +=
-                (gKartAccelerationTables[player->characterId][0] + (0.05 * (player->slopeAccel / 182))) *
-                gKartTripleABoost[player->characterId];
+            player->currentSpeed = mk64_canonical_accel_step(player->currentSpeed,
+                gKartAccelerationTables[player->characterId][0], player->slopeAccel,
+                gKartTripleABoost[player->characterId], 1);
         }
         if (((player->topSpeed * 0.1) <= player->currentSpeed) && (player->currentSpeed < (player->topSpeed * 0.2))) {
-            player->currentSpeed +=
-                (gKartAccelerationTables[player->characterId][1] + (0.05 * (player->slopeAccel / 182))) *
-                gKartTripleABoost[player->characterId];
+            player->currentSpeed = mk64_canonical_accel_step(player->currentSpeed,
+                gKartAccelerationTables[player->characterId][1], player->slopeAccel,
+                gKartTripleABoost[player->characterId], 1);
         }
         if (((player->topSpeed * 0.2) <= player->currentSpeed) && (player->currentSpeed < (player->topSpeed * 0.3))) {
-            player->currentSpeed +=
-                (gKartAccelerationTables[player->characterId][2] + (0.05 * (player->slopeAccel / 182))) *
-                gKartTripleABoost[player->characterId];
+            player->currentSpeed = mk64_canonical_accel_step(player->currentSpeed,
+                gKartAccelerationTables[player->characterId][2], player->slopeAccel,
+                gKartTripleABoost[player->characterId], 1);
         }
         if (((player->topSpeed * 0.3) <= player->currentSpeed) && (player->currentSpeed < (player->topSpeed * 0.4))) {
-            player->currentSpeed +=
-                (gKartAccelerationTables[player->characterId][3] + (0.05 * (player->slopeAccel / 182))) *
-                gKartTripleABoost[player->characterId];
+            player->currentSpeed = mk64_canonical_accel_step(player->currentSpeed,
+                gKartAccelerationTables[player->characterId][3], player->slopeAccel,
+                gKartTripleABoost[player->characterId], 1);
         }
         if (((player->topSpeed * 0.4) <= player->currentSpeed) && (player->currentSpeed < (player->topSpeed * 0.5))) {
-            player->currentSpeed +=
-                (gKartAccelerationTables[player->characterId][4] + (0.05 * (player->slopeAccel / 182))) *
-                gKartTripleABoost[player->characterId];
+            player->currentSpeed = mk64_canonical_accel_step(player->currentSpeed,
+                gKartAccelerationTables[player->characterId][4], player->slopeAccel,
+                gKartTripleABoost[player->characterId], 1);
         }
         if (((player->topSpeed * 0.5) <= player->currentSpeed) && (player->currentSpeed < (player->topSpeed * 0.6))) {
-            player->currentSpeed +=
-                (gKartAccelerationTables[player->characterId][5] + (0.05 * (player->slopeAccel / 182))) *
-                gKartTripleABoost[player->characterId];
+            player->currentSpeed = mk64_canonical_accel_step(player->currentSpeed,
+                gKartAccelerationTables[player->characterId][5], player->slopeAccel,
+                gKartTripleABoost[player->characterId], 1);
         }
         if (((player->topSpeed * 0.6) <= player->currentSpeed) && (player->currentSpeed < (player->topSpeed * 0.7))) {
-            player->currentSpeed +=
-                (gKartAccelerationTables[player->characterId][6] + (0.05 * (player->slopeAccel / 182))) *
-                gKartTripleABoost[player->characterId];
+            player->currentSpeed = mk64_canonical_accel_step(player->currentSpeed,
+                gKartAccelerationTables[player->characterId][6], player->slopeAccel,
+                gKartTripleABoost[player->characterId], 1);
         }
         if (((player->topSpeed * 0.7) <= player->currentSpeed) && (player->currentSpeed < (player->topSpeed * 0.8))) {
-            player->currentSpeed +=
-                (gKartAccelerationTables[player->characterId][7] + (0.05 * (player->slopeAccel / 182))) *
-                gKartTripleABoost[player->characterId];
+            player->currentSpeed = mk64_canonical_accel_step(player->currentSpeed,
+                gKartAccelerationTables[player->characterId][7], player->slopeAccel,
+                gKartTripleABoost[player->characterId], 1);
         }
         if (((player->topSpeed * 0.8) <= player->currentSpeed) && (player->currentSpeed < (player->topSpeed * 0.9))) {
-            player->currentSpeed +=
-                (gKartAccelerationTables[player->characterId][8] + (0.05 * (player->slopeAccel / 182))) *
-                gKartTripleABoost[player->characterId];
+            player->currentSpeed = mk64_canonical_accel_step(player->currentSpeed,
+                gKartAccelerationTables[player->characterId][8], player->slopeAccel,
+                gKartTripleABoost[player->characterId], 1);
         }
         if (((player->topSpeed * 0.9) <= player->currentSpeed) && (player->currentSpeed <= (player->topSpeed * 1.0))) {
-            player->currentSpeed +=
-                (gKartAccelerationTables[player->characterId][9] + (0.05 * (player->slopeAccel / 182))) *
-                gKartTripleABoost[player->characterId];
+            player->currentSpeed = mk64_canonical_accel_step(player->currentSpeed,
+                gKartAccelerationTables[player->characterId][9], player->slopeAccel,
+                gKartTripleABoost[player->characterId], 1);
         }
     }
     if (player->currentSpeed < 0.0f) {
@@ -3289,10 +3303,10 @@ void player_accelerate(Player* player) {
         player->currentSpeed = player->topSpeed;
     }
     if (!((player->effects & 8)) || ((player->effects & LIGHTNING_EFFECT))) {
-        player->unk_08C = (player->currentSpeed * player->currentSpeed) / 25.0f;
+        player->unk_08C = mk64_canonical_speed_square_div25(player->currentSpeed);
     }
     player->unk_044 |= 0x20;
-    if ((player->soundEffects * 8) < 0) {
+    if (((u32)player->soundEffects & 0x10000000U) != 0) {
         func_8008F104(player, player_index);
         player->soundEffects &= 0xEFFFFFFF;
     }
@@ -3313,10 +3327,10 @@ void decelerate_player(Player* player, f32 speed) {
         player->currentSpeed = player->topSpeed;
     }
     if ((player->effects & 8) != 8) {
-        player->unk_08C = (player->currentSpeed * player->currentSpeed) / 25.0f;
+        player->unk_08C = mk64_canonical_speed_square_div25(player->currentSpeed);
     }
     player->unk_044 &= 0xFFDF;
-    if ((player->soundEffects * 8) < 0) {
+    if (((u32)player->soundEffects & 0x10000000U) != 0) {
         func_8008F104(player, player_index);
         player->soundEffects &= 0xEFFFFFFF;
     }
@@ -3567,7 +3581,7 @@ void func_80032700(Player* player) {
         }
     }
     player->unk_044 |= 0x20;
-    player->unk_098 = (player->currentSpeed * player->currentSpeed) / 25.0f;
+    player->unk_098 = mk64_canonical_speed_square_div25(player->currentSpeed);
 }
 
 void func_80032CB0(Player* player, f32 arg1) {
@@ -3586,7 +3600,7 @@ void func_80032CB0(Player* player, f32 arg1) {
     }
     player->soundEffects &= ~0x02000000;
     player->unk_044 &= ~0x0020;
-    player->unk_098 = (player->currentSpeed * player->currentSpeed) / 25.0f;
+    player->unk_098 = mk64_canonical_speed_square_div25(player->currentSpeed);
 }
 
 void func_80032D94(Player* player) {
@@ -3626,7 +3640,7 @@ void func_80032D94(Player* player) {
     if (player->currentSpeed < 0.0f) {
         player->currentSpeed = 0.0f;
     }
-    player->unk_098 = (player->currentSpeed * player->currentSpeed) / 25.0f;
+    player->unk_098 = mk64_canonical_speed_square_div25(player->currentSpeed);
 }
 
 void func_80033280(Player* player, f32 arg1) {
@@ -3637,7 +3651,7 @@ void func_80033280(Player* player, f32 arg1) {
     if (player->topSpeed <= player->currentSpeed) {
         player->currentSpeed = player->topSpeed;
     }
-    player->unk_098 = (player->currentSpeed * player->currentSpeed) / 25.0f;
+    player->unk_098 = mk64_canonical_speed_square_div25(player->currentSpeed);
 }
 
 void func_800332E8(Player* player, s32 arg1) {
@@ -3675,7 +3689,7 @@ void func_800332E8(Player* player, s32 arg1) {
     if (D_80165280[arg1] < 0.0f) {
         D_80165280[arg1] = 0.0f;
     }
-    player->unk_098 = (D_80165280[arg1] * D_80165280[arg1]) / 25.0f;
+    player->unk_098 = mk64_canonical_speed_square_div25(D_80165280[arg1]);
 }
 
 void func_800337CC(Player* player, f32 arg1, s32 arg2) {
@@ -3687,7 +3701,7 @@ void func_800337CC(Player* player, f32 arg1, s32 arg2) {
     if (player->topSpeed <= D_80165280[arg2]) {
         D_80165280[arg2] = player->topSpeed;
     }
-    player->unk_098 = (D_80165280[arg2] * D_80165280[arg2]) / 25.0f;
+    player->unk_098 = mk64_canonical_speed_square_div25(D_80165280[arg2]);
 }
 
 void func_80033850(Player* arg0, f32 arg1) {
@@ -4531,7 +4545,7 @@ void func_80037CFC(Player* player, struct Controller* controller, s8 arg2) {
                 (controller->button & B_BUTTON)) {
                 player->currentSpeed = 140.0f;
                 player->unk_044 |= 1;
-                player->unk_08C = (player->currentSpeed * player->currentSpeed) / 25.0f;
+                player->unk_08C = mk64_canonical_speed_square_div25(player->currentSpeed);
                 player->unk_20C = 0.0f;
             }
             if ((func_800388B0(controller) >= -0x1D) || (!(controller->button & B_BUTTON))) {
@@ -4767,7 +4781,7 @@ void func_80038BE4(Player* player, s16 arg1) {
         player->currentSpeed = 250.0f;
     }
     player->unk_044 |= 0x20;
-    player->unk_08C = (player->currentSpeed * player->currentSpeed) / 25.0f;
+    player->unk_08C = mk64_canonical_speed_square_div25(player->currentSpeed);
 }
 
 void func_80038C6C(Player* player, UNUSED Camera* camera, s8 arg2, s8 playerId) {
@@ -4920,4 +4934,11 @@ void func_80038C6C(Player* player, UNUSED Camera* camera, s8 arg2, s8 playerId) 
         player->unk_078 /= 2;
     }
     func_8002C4F8(player, playerId);
+}
+
+unsigned int mk64_r27_speed_probe(void) {
+    volatile float speed = 6.0f;
+    union { float f; unsigned int u; } result;
+    result.f = mk64_canonical_speed_square_div25(speed);
+    return result.u;
 }

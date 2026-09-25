@@ -1,3 +1,4 @@
+#include "canonical_gameplay.h"
 #include <ultra64.h>
 #include <macros.h>
 #include <mk64.h>

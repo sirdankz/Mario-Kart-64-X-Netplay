@@ -26,6 +26,7 @@
 #include "profiler.h"
 #include "main.h"
 #if defined(TARGET_XBOX)
+#include "xbox_netplay.h"
 #include "xbox_debug.h"
 #else
 #define MK64X_DEBUG_TOOLS 0
@@ -54,6 +55,9 @@
 #include "render_player.h"
 #include "render_courses.h"
 #include "actors.h"
+#include "objects.h"
+#include "actor_types.h"
+#include "bomb_kart.h"
 #include "staff_ghosts.h"
 #include <debug.h>
 #include "crash_screen.h"
@@ -64,6 +68,10 @@
 
 char *fnpre;
 const void *__kos_romdisk;
+
+/* R14: stay in strict host-authoritative staging through the exact frame where
+ * the 360 announces 3; normal race Stream4 begins next frame. */
+static int sXplayGuestRaceReleaseSeen = 0;
 
 void func_80091B78(void);
 void audio_init(void);
@@ -99,6 +107,50 @@ Player* gPlayerFive = &gPlayers[4];
 Player* gPlayerSix = &gPlayers[5];
 Player* gPlayerSeven = &gPlayers[6];
 Player* gPlayerEight = &gPlayers[7];
+
+#if defined(TARGET_XBOX)
+/* MK64_CROSSPLAY_R22_DETERMINISM_PARITY
+ * Crossplay is x86 vs PPC.  Keep local presentation from mutating the
+ * deterministic simulation state, and make the 30 Hz network clock use an
+ * explicitly-defined binary32 reciprocal instead of compiler-dependent /30.
+ */
+static Player sR22CrossplayPlayers[NUM_PLAYERS];
+static Object sR22CrossplayObjects[OBJECT_LIST_SIZE];
+static struct Actor sR22CrossplayActors[ACTOR_LIST_SIZE];
+static BombKart sR22CrossplayBombs[NUM_BOMB_KARTS_MAX];
+static u16 sR22CrossplayRandomSeed;
+static s32 sR22CrossplayPresentationSaved;
+
+static f32 r22_crossplay_frame_time(unsigned int frame) {
+    union { u32 bits; f32 value; } inv30;
+    if (!xbox_netplay_crossplay()) {
+        return (f32) frame / 30.0f;
+    }
+    /* Exact IEEE-754 binary32 bits for the reciprocal used by the PPC build. */
+    inv30.bits = 0x3D088889U;
+    return (f32) frame * inv30.value;
+}
+
+static void r22_crossplay_present_begin(void) {
+    if (!xbox_netplay_crossplay() || sR22CrossplayPresentationSaved) return;
+    memcpy(sR22CrossplayPlayers, gPlayers, sizeof(sR22CrossplayPlayers));
+    memcpy(sR22CrossplayObjects, gObjectList, sizeof(sR22CrossplayObjects));
+    memcpy(sR22CrossplayActors, gActorList, sizeof(sR22CrossplayActors));
+    memcpy(sR22CrossplayBombs, gBombKarts, sizeof(sR22CrossplayBombs));
+    sR22CrossplayRandomSeed = gRandomSeed16;
+    sR22CrossplayPresentationSaved = 1;
+}
+
+static void r22_crossplay_present_end(void) {
+    if (!sR22CrossplayPresentationSaved) return;
+    memcpy(gPlayers, sR22CrossplayPlayers, sizeof(sR22CrossplayPlayers));
+    memcpy(gObjectList, sR22CrossplayObjects, sizeof(sR22CrossplayObjects));
+    memcpy(gActorList, sR22CrossplayActors, sizeof(sR22CrossplayActors));
+    memcpy(gBombKarts, sR22CrossplayBombs, sizeof(sR22CrossplayBombs));
+    gRandomSeed16 = sR22CrossplayRandomSeed;
+    sR22CrossplayPresentationSaved = 0;
+}
+#endif
 
 Player* gPlayerOneCopy = &gPlayers[0];
 Player* gPlayerTwoCopy = &gPlayers[1];
@@ -251,15 +303,36 @@ void game_loop_one_iteration(void) {
     even_frame = !((frameno++) & 1);
     {
         static uint64_t last_30hz_vbl = 0;
-        gRun30hz = (vblticker - last_30hz_vbl) >= 2;
-        if (gRun30hz) {
+#if defined(TARGET_XBOX)
+        /* R4 crossplay timing parity: the Xbox 360 netplay game loop is one
+         * deterministic 30 Hz simulation step per consumed network frame.
+         * Never let OG Xbox's independent 60 Hz hardware vblank decide whether
+         * a simulation update runs while online. */
+        if (xbox_netplay_active()) {
+            gRun30hz = 1;
             last_30hz_vbl = vblticker;
+        } else
+#endif
+        {
+            gRun30hz = (vblticker - last_30hz_vbl) >= 2;
+            if (gRun30hz) {
+                last_30hz_vbl = vblticker;
+            }
         }
     }
 
     gfx_start_frame();
 
+#if defined(TARGET_XBOX)
+    /* Match the current Xbox 360 online phase ordering. Offline keeps the
+     * original ordering. Online advances this game-owned audio/state phase
+     * only AFTER read_controllers() has consumed the common lockstep frame. */
+    if (!xbox_netplay_active()) {
+        func_800CB2C4();
+    }
+#else
     func_800CB2C4();
+#endif
 
 #if MK64X_CEREMONY_JUMP
     /* BOTH TRIGGERS + BACK jumps to the award ceremony from anywhere, so its
@@ -287,33 +360,577 @@ void game_loop_one_iteration(void) {
     }
 #endif
 
-    // Update the gamestate if it has changed (racing, menus, credits, etc.).
-    if (gGamestateNext != gGamestate) {
-        // Transition tracing: on a hardware hang, the LAST TRANS line in
-        // xbWatson names the teardown stage that died. Same lines print in
-        // xemu, so the two runs can be diffed step for step.
-#if MK64X_DEBUG_TOOLS
-        printf("TRANS gamestate %d -> %d\n", (int) gGamestate, (int) gGamestateNext);
+    /*
+     * R10 crossplay scheduling.  Same-platform/offline keeps the historical
+     * ordering.  OG<->360 crossplay deliberately commits the synchronized
+     * controller frame BEFORE applying a pending MK64 state transition.
+     * This prevents a faster platform from entering the next title/menu/fade
+     * state while the peer is still executing the previous one.
+     */
+#if defined(TARGET_XBOX)
+    if (!xbox_netplay_crossplay())
 #endif
-        gGamestate = gGamestateNext;
-        update_gamestate();
+    {
+        if (gGamestateNext != gGamestate) {
 #if MK64X_DEBUG_TOOLS
-        printf("TRANS gamestate %d ready\n", (int) gGamestate);
+            printf("TRANS gamestate %d -> %d\n", (int) gGamestate, (int) gGamestateNext);
 #endif
+            gGamestate = gGamestateNext;
+            update_gamestate();
+#if MK64X_DEBUG_TOOLS
+            printf("TRANS gamestate %d ready\n", (int) gGamestate);
+#endif
+        }
     }
 
     config_gfx_pool();
 
+#if defined(TARGET_XBOX)
+    if (xbox_netplay_active()) {
+        if (xbox_netplay_crossplay() && gGamestate == RACING) {
+            int hrs = xbox_netplay_host_race_state();
+            int localLifecycle = (D_800DC510 != 3 ||
+                                  gIsGamePaused != 0 ||
+                                  gIsInQuitToMenuTransition != 0 ||
+                                  gGamestateNext != gGamestate);
+            /* R32: R31 proved the guest could stay in low-latency race mode
+             * after the host had entered RACE_HUMAN_FINISHED/results.  That
+             * left HOST menuSync=1 and OG menuSync=0 and caused a false hash
+             * fault even while gameplay state still matched.  Local lifecycle
+             * state is deterministic, so use it to re-enter strict sync. */
+            if (localLifecycle || (hrs >= 0 && hrs != 3)) {
+                sXplayGuestRaceReleaseSeen = 0;
+                xbox_netplay_set_menu_sync(1);
+            } else {
+                xbox_netplay_set_menu_sync(sXplayGuestRaceReleaseSeen ? 0 : 1);
+            }
+        } else {
+            sXplayGuestRaceReleaseSeen = 0;
+            xbox_netplay_set_menu_sync((gGamestate != RACING ||
+                                       D_800DC510 != 3 ||
+                                       gIsGamePaused != 0 ||
+                                       gIsInQuitToMenuTransition != 0 ||
+                                       gGamestateNext != gGamestate) ? 1 : 0);
+        }
+    }
+#endif
     read_controllers();
 
+#if defined(TARGET_XBOX)
+    /*
+     * MK64_R35_PAUSE_RELEASE_SYNC
+     *
+     * Arm release from strict lifecycle synchronization ONLY after this OG
+     * frame has consumed an authoritative host snapshot that is genuinely back
+     * in active race state 3 and all local lifecycle flags have cleared.
+     *
+     * R32 used hostRS >= 3. During pause the host race state is also >= 3, so
+     * the guest repeatedly armed sXplayGuestRaceReleaseSeen while still paused.
+     * On the first unpause frame that stale "seen" bit made OG disable strict
+     * sync one controller frame earlier than the 360 host.
+     */
+    if (xbox_netplay_crossplay() && gGamestate == RACING &&
+        xbox_netplay_host_race_state() == 3 &&
+        D_800DC510 == 3 &&
+        gIsGamePaused == 0 &&
+        gIsInQuitToMenuTransition == 0 &&
+        gGamestateNext == gGamestate &&
+        !sXplayGuestRaceReleaseSeen) {
+        sXplayGuestRaceReleaseSeen = 1;
+        xbox_netplay_trace("R35_HOST_GO_RELEASE_ARM frame=%u localRS=%u hostRS=%d pause=%u quit=%u\n",
+                           xbox_netplay_frame(), (unsigned)D_800DC510,
+                           xbox_netplay_host_race_state(),
+                           (unsigned)gIsGamePaused,
+                           (unsigned)gIsInQuitToMenuTransition);
+    }
+#endif
+
+#if defined(TARGET_XBOX)
+    if (xbox_netplay_crossplay()) {
+        /* Make the MK64-visible clocks canonical at the host-committed frame.
+         * Rendering/vblank remains local presentation timing. */
+        gGlobalTimer = (s32)xbox_netplay_frame();
+        gVBlankTimer = r22_crossplay_frame_time(xbox_netplay_frame());
+        sNumVBlanks = 2;
+        gRun30hz = 1;
+
+        if (gGamestateNext != gGamestate) {
+            xbox_netplay_trace("R12_TRANS PRE frame=%u gs=%d next=%d rs=%u course=%d activeSM=%d selSM=%d pc=%d\n",
+                               xbox_netplay_frame(), (int)gGamestate, (int)gGamestateNext, (unsigned)D_800DC510,
+                               (int)gCurrentCourseId, (int)gActiveScreenMode, (int)gScreenModeSelection,
+                               (int)gPlayerCountSelection1);
+#if MK64X_DEBUG_TOOLS
+            printf("XPLAY TRANS gamestate %d -> %d frame=%u\n",
+                   (int)gGamestate, (int)gGamestateNext, xbox_netplay_frame());
+#endif
+            gGamestate = gGamestateNext;
+            update_gamestate();
+            xbox_netplay_trace("R12_TRANS POST frame=%u gs=%d next=%d rs=%u course=%d activeSM=%d p1=(%.2f,%.2f,%.2f)\n",
+                               xbox_netplay_frame(), (int)gGamestate, (int)gGamestateNext, (unsigned)D_800DC510,
+                               (int)gCurrentCourseId, (int)gActiveScreenMode,
+                               gPlayers[0].pos[0], gPlayers[0].pos[1], gPlayers[0].pos[2]);
+        }
+    }
+
+    /* Xbox 360 does this immediately after its netplay controller barrier.
+     * This prevents the faster console from advancing game-owned audio/state
+     * while the slower peer is still waiting on the previous network frame. */
+    if (xbox_netplay_active()) {
+        func_800CB2C4();
+    }
+#endif
+
+#if defined(TARGET_XBOX)
+    {
+        static int r12LifecycleFrames = 0;
+        int r12TraceLifecycle = xbox_netplay_active() && gGamestate == RACING && r12LifecycleFrames < 24;
+        if (r12TraceLifecycle)
+            xbox_netplay_trace("R12_LOOP %d PRE_HANDLER net=%u rs=%u activeSM=%d tick=%d pause=%u quit=%u CT=%.3f VT=%.3f\n",
+                               r12LifecycleFrames, xbox_netplay_frame(), (unsigned)D_800DC510, (int)gActiveScreenMode,
+                               (int)gTickSpeed, (unsigned)gIsGamePaused, (unsigned)gIsInQuitToMenuTransition,
+                               gCourseTimer, gVBlankTimer);
+        game_state_handler();
+        if (r12TraceLifecycle) xbox_netplay_trace("R12_LOOP %d POST_HANDLER\n", r12LifecycleFrames);
+        if (r12TraceLifecycle) xbox_netplay_trace("R12_LOOP %d PRE_END_DL\n", r12LifecycleFrames);
+        end_master_display_list();
+        if (r12TraceLifecycle) xbox_netplay_trace("R12_LOOP %d POST_END_DL PRE_VSYNC\n", r12LifecycleFrames);
+        display_and_vsync();
+        if (r12TraceLifecycle) xbox_netplay_trace("R12_LOOP %d POST_VSYNC PRE_GFX_END\n", r12LifecycleFrames);
+        gfx_end_frame();
+        if (r12TraceLifecycle) {
+            xbox_netplay_trace("R12_LOOP %d POST_GFX_END\n", r12LifecycleFrames);
+            r12LifecycleFrames++;
+        }
+    }
+#else
     game_state_handler();
-
     end_master_display_list();
-
     display_and_vsync();
-
     gfx_end_frame();
+#endif
 }
+
+
+#if defined(TARGET_XBOX)
+
+#define XPLAY_STATE_BYTES 1440
+#define XPLAY_MENU_ITEM_BASE 160
+#define XPLAY_MENU_ITEM_STRIDE 40
+static void xplay_state_put32(u8 *p,u32 v){p[0]=(u8)(v>>24);p[1]=(u8)(v>>16);p[2]=(u8)(v>>8);p[3]=(u8)v;}
+static u32 xplay_state_get32(const u8 *p){return ((u32)p[0]<<24)|((u32)p[1]<<16)|((u32)p[2]<<8)|p[3];}
+static u32 xplay_state_f32_bits(f32 v){u32 b=0;memcpy(&b,&v,sizeof(b));return b;}
+static f32 xplay_state_bits_f32(u32 b){f32 v=0.0f;memcpy(&v,&b,sizeof(v));return v;}
+
+int xbox_crossplay_state_pack(unsigned char *out,int cap){
+    extern u16 gRandomSeed16;
+    int i,j,k=0;
+    if(!out||cap<XPLAY_STATE_BYTES)return 0;
+    memset(out,0,XPLAY_STATE_BYTES);
+#define XP32(off,v) xplay_state_put32(out+(off),(u32)(v))
+    XP32(0,gGlobalTimer);
+    XP32(4,gGamestate);
+    XP32(8,gGamestateNext);
+    XP32(12,gMenuSelection);
+    XP32(16,gFadeModeSelection);
+    XP32(20,gMenuFadeType);
+    XP32(24,gMenuTimingCounter);
+    XP32(28,gMenuDelayTimer);
+    XP32(32,gPlayerCountSelection1);
+    XP32(36,gScreenModeSelection);
+    XP32(40,gModeSelection);
+    XP32(44,gCCSelection);
+    XP32(48,gCurrentCourseId);
+    XP32(52,gCupSelection);
+    XP32(56,gCourseIndexInCup);
+    XP32(60,gMainMenuSelection);
+    XP32(64,gPlayerSelectMenuSelection);
+    XP32(68,gSubMenuSelection);
+    XP32(72,gPlayerCount);
+    XP32(76,gScreenModeListIndex);
+    XP32(80,gDemoMode);
+    XP32(84,gDemoUseController);
+    XP32(88,unref_8018EE0C);
+    XP32(92,gDebugMenuSelection);
+    XP32(96,D_800DC510);
+    XP32(100,gRandomSeed16);
+    XP32(104,xplay_state_f32_bits(gVBlankTimer));
+    XP32(108,xplay_state_f32_bits(gCourseTimer));
+#undef XP32
+    for(i=0;i<4;++i)out[112+i]=(u8)gCharacterSelections[i];
+    for(i=0;i<4;++i)out[116+i]=(u8)gCharacterGridSelections[i];
+    for(i=0;i<4;++i)out[120+i]=(u8)gCharacterGridIsSelected[i];
+    for(i=0;i<5;++i)out[124+i]=(u8)D_8018E7AC[i];
+    for(i=0;i<4;++i)out[129+i]=(u8)gGameModeMenuColumn[i];
+    for(i=0;i<4;++i)for(j=0;j<3;++j)out[133+k++]=(u8)gGameModeSubMenuColumn[i][j];
+    out[145]=gControllerBits;
+    /* R32 lifecycle extension. Bytes 146..159 were unused/reserved in the
+     * existing 1440-byte wire image, so protocol size and MenuItem layout stay
+     * unchanged. Keep the result/cup/quit transition itself host-authoritative,
+     * not only the menu drawn around it. */
+    {
+        extern s32 gDemoTimer;
+        u16 demo=(u16)(s16)gDemoTimer;
+        out[146]=(u8)(demo>>8);
+        out[147]=(u8)demo;
+    }
+    out[148]=(u8)gGotoMode;
+    out[149]=(u8)gIsGamePaused;
+    out[150]=(u8)gIsInQuitToMenuTransition;
+    out[151]=(u8)D_80150120;
+    xplay_state_put32(out+152,(u32)D_800DC544);
+    /* 156..159 remain reserved for a future lifecycle field without moving
+     * XPLAY_MENU_ITEM_BASE. */
+    /* The stock menu engine stores most transition timers/selection animation
+     * state in gMenuItems[].  Both ports use the same logical MenuItem fields.
+     * Serialize them explicitly so the 360 host is authoritative without
+     * transmitting native structs, pointers or CPU-endian memory. */
+    for(i=0;i<MENU_ITEMS_MAX;++i){
+        const MenuItem *m=&gMenuItems[i];
+        int o=XPLAY_MENU_ITEM_BASE+i*XPLAY_MENU_ITEM_STRIDE;
+        xplay_state_put32(out+o+0,(u32)m->type);
+        xplay_state_put32(out+o+4,(u32)m->state);
+        xplay_state_put32(out+o+8,(u32)m->subState);
+        xplay_state_put32(out+o+12,(u32)m->column);
+        xplay_state_put32(out+o+16,(u32)m->row);
+        out[o+20]=(u8)m->priority;
+        out[o+21]=(u8)m->visible;
+        out[o+22]=(u8)(((u16)m->unused)>>8);
+        out[o+23]=(u8)((u16)m->unused);
+        xplay_state_put32(out+o+24,(u32)m->D_8018DEE0_index);
+        xplay_state_put32(out+o+28,(u32)m->param1);
+        xplay_state_put32(out+o+32,(u32)m->param2);
+        xplay_state_put32(out+o+36,xplay_state_f32_bits(m->paramf));
+    }
+    return XPLAY_STATE_BYTES;
+}
+
+void xbox_crossplay_state_apply(const unsigned char *in,int len){
+    extern u16 gRandomSeed16;
+    int i,j,k=0;
+    if(!in||len!=XPLAY_STATE_BYTES)return;
+#define XG32(off) ((s32)xplay_state_get32(in+(off)))
+    gGlobalTimer=XG32(0);
+    /* R11: gGamestate is a LOCAL lifecycle state, not a replicated value.
+     * The 360 host is authoritative for the TARGET state (gGamestateNext),
+     * but the OG must execute update_gamestate() locally when crossing a
+     * state boundary.  Overwriting gGamestate here used to make the later
+     * (gGamestateNext != gGamestate) check false, skipping setup_race() and
+     * softlocking on the tiny-box -> race transition. */
+    gGamestateNext=XG32(8);
+    gMenuSelection=XG32(12);
+    gFadeModeSelection=XG32(16);
+    gMenuFadeType=XG32(20);
+    gMenuTimingCounter=XG32(24);
+    gMenuDelayTimer=XG32(28);
+    gPlayerCountSelection1=XG32(32);
+    gScreenModeSelection=XG32(36);
+    gModeSelection=XG32(40);
+    gCCSelection=XG32(44);
+    gCurrentCourseId=(s16)XG32(48);
+    gCupSelection=(s8)XG32(52);
+    gCourseIndexInCup=(s8)XG32(56);
+    gMainMenuSelection=(s8)XG32(60);
+    gPlayerSelectMenuSelection=(s8)XG32(64);
+    gSubMenuSelection=(s8)XG32(68);
+    gPlayerCount=(s8)XG32(72);
+    gScreenModeListIndex=(s8)XG32(76);
+    gDemoMode=(u16)XG32(80);
+    gDemoUseController=(s8)XG32(84);
+    unref_8018EE0C=(s8)XG32(88);
+    gDebugMenuSelection=(s8)XG32(92);
+    {
+        /* R13: once the OG has locally entered RACING, D_800DC510 is its
+         * race lifecycle state.  Do not overwrite it from the 360 menu-state
+         * snapshot.  R12 proved func_8028FCBC advanced 0 -> 1, then the next
+         * STATE_SYNC forced it back to 0 forever, restarting the tiny-box
+         * start transition every frame.  Before RACING, the host value is
+         * still accepted so menu/transition setup remains authoritative. */
+        u16 hostRaceState=(u16)XG32(96);
+        if(gGamestate!=RACING){
+            D_800DC510=hostRaceState;
+        }else{
+            static unsigned r13RaceStateKeepLogs=0;
+            if((D_800DC510!=hostRaceState) &&
+               (r13RaceStateKeepLogs<12 || (r13RaceStateKeepLogs%120U)==0)){
+                xbox_netplay_trace("R13_KEEP_LOCAL_RS frame=%u local=%u host=%u\n",
+                                   xbox_netplay_frame(), (unsigned)D_800DC510,
+                                   (unsigned)hostRaceState);
+            }
+            ++r13RaceStateKeepLogs;
+        }
+    }
+    gRandomSeed16=(u16)XG32(100);
+#undef XG32
+    gVBlankTimer=xplay_state_bits_f32(xplay_state_get32(in+104));
+    gCourseTimer=xplay_state_bits_f32(xplay_state_get32(in+108));
+    for(i=0;i<4;++i)gCharacterSelections[i]=(s8)in[112+i];
+    for(i=0;i<4;++i)gCharacterGridSelections[i]=(s8)in[116+i];
+    for(i=0;i<4;++i)gCharacterGridIsSelected[i]=(s8)in[120+i];
+    for(i=0;i<5;++i)D_8018E7AC[i]=(s8)in[124+i];
+    for(i=0;i<4;++i)gGameModeMenuColumn[i]=(s8)in[129+i];
+    for(i=0;i<4;++i)for(j=0;j<3;++j)gGameModeSubMenuColumn[i][j]=(s8)in[133+k++];
+    gControllerBits=in[145];
+    {
+        extern s32 gDemoTimer;
+        gDemoTimer=(s32)(s16)(((u16)in[146]<<8)|in[147]);
+    }
+    gGotoMode=(s32)(u8)in[148];
+    gIsGamePaused=(s32)(u8)in[149];
+    gIsInQuitToMenuTransition=(s32)(u8)in[150];
+    D_80150120=(s32)(u8)in[151];
+    D_800DC544=(s32)xplay_state_get32(in+152);
+    for(i=0;i<MENU_ITEMS_MAX;++i){
+        MenuItem *m=&gMenuItems[i];
+        int o=XPLAY_MENU_ITEM_BASE+i*XPLAY_MENU_ITEM_STRIDE;
+        m->type=(s32)xplay_state_get32(in+o+0);
+        m->state=(s32)xplay_state_get32(in+o+4);
+        m->subState=(s32)xplay_state_get32(in+o+8);
+        m->column=(s32)xplay_state_get32(in+o+12);
+        m->row=(s32)xplay_state_get32(in+o+16);
+        m->priority=(s8)in[o+20];
+        m->visible=(bool8)in[o+21];
+        m->unused=(s16)(((u16)in[o+22]<<8)|in[o+23]);
+        m->D_8018DEE0_index=(s32)xplay_state_get32(in+o+24);
+        m->param1=(s32)xplay_state_get32(in+o+28);
+        m->param2=(s32)xplay_state_get32(in+o+32);
+        m->paramf=xplay_state_bits_f32(xplay_state_get32(in+o+36));
+    }
+}
+
+static u32 cross_hash_u8(u32 h,u8 v){return (h^v)*16777619U;}
+static u32 cross_hash_u16(u32 h,u16 v){h=cross_hash_u8(h,(u8)(v>>8));return cross_hash_u8(h,(u8)v);}
+static u32 cross_hash_u32(u32 h,u32 v){h=cross_hash_u8(h,(u8)(v>>24));h=cross_hash_u8(h,(u8)(v>>16));h=cross_hash_u8(h,(u8)(v>>8));return cross_hash_u8(h,(u8)v);}
+static u32 cross_hash_f32(u32 h,f32 v){u32 bits=0;memcpy(&bits,&v,sizeof(bits));return cross_hash_u32(h,bits);}
+static u32 cross_phase_hash(u32 h){
+    int i;
+    h=cross_hash_u32(h,(u32)gGamestate);
+    h=cross_hash_u32(h,(u32)gGamestateNext);
+    if(gGamestate==RACING){
+        h=cross_hash_u32(h,(u32)gModeSelection);
+        h=cross_hash_u16(h,(u16)D_800DC510);
+        h=cross_hash_u32(h,(u32)gPlayerCountSelection1);
+        h=cross_hash_u32(h,(u32)gScreenModeSelection);
+    }else{
+        h=cross_hash_u32(h,(u32)gMenuSelection);
+        h=cross_hash_u8(h,(u8)gMainMenuSelection);
+        h=cross_hash_u8(h,(u8)gPlayerSelectMenuSelection);
+        h=cross_hash_u8(h,(u8)gSubMenuSelection);
+        h=cross_hash_u8(h,(u8)gPlayerCount);
+        h=cross_hash_u32(h,(u32)gPlayerCountSelection1);
+        h=cross_hash_u32(h,(u32)gScreenModeSelection);
+        h=cross_hash_u32(h,(u32)gModeSelection);
+    }
+    h=cross_hash_u8(h,(u8)gCupSelection);
+    h=cross_hash_u8(h,(u8)gCourseIndexInCup);
+    /* R32: hash the state that selects/times the next lifecycle boundary. */
+    {
+        extern s32 gDemoTimer;
+        h=cross_hash_u16(h,(u16)(s16)gDemoTimer);
+    }
+    h=cross_hash_u8(h,(u8)gGotoMode);
+    h=cross_hash_u8(h,(u8)gIsGamePaused);
+    h=cross_hash_u8(h,(u8)gIsInQuitToMenuTransition);
+    h=cross_hash_u8(h,(u8)D_80150120);
+    h=cross_hash_u32(h,(u32)D_800DC544);
+    for(i=0;i<4;++i)h=cross_hash_u8(h,(u8)gCharacterSelections[i]);
+    return h;
+}
+
+
+/* R18 cross-platform race hash.
+ * PPC 360 and x86 OG can differ by a few IEEE-754 LSBs even when the actual
+ * kart state is equivalent. 360<->360 keeps the original exact hash.
+ * Cross-platform racing uses a canonical quantized hash; raw RNG/timers/floats
+ * stay available in the R17 diagnostics. */
+static s32 cross_r18_qpos(f32 v){return v>=0.0f?(s32)(v*8.0f+0.5f):(s32)(v*8.0f-0.5f);}
+static s32 cross_r18_qvel(f32 v){return v>=0.0f?(s32)(v*64.0f+0.5f):(s32)(v*64.0f-0.5f);}
+static u32 cross_r18_race_hash(u32 h,int players){
+    int i,j;
+    h=cross_hash_u32(h,(u32)gGlobalTimer);
+    h=cross_phase_hash(h);
+    for(i=0;i<players;++i){
+        h=cross_hash_u16(h,gPlayers[i].type);
+        h=cross_hash_u16(h,(u16)gPlayers[i].lapCount);
+        h=cross_hash_u32(h,gPlayers[i].effects);
+        for(j=0;j<3;++j)h=cross_hash_u32(h,(u32)cross_r18_qpos(gPlayers[i].pos[j]));
+        for(j=0;j<3;++j)h=cross_hash_u32(h,(u32)cross_r18_qvel(gPlayers[i].velocity[j]));
+    }
+    return h;
+}
+
+/* MK64_ASTRA_TRACE_R17: RAM-only rolling deterministic state trace. */
+#if defined(TARGET_XBOX)
+#define ASTRA_FRAME_HISTORY 512U
+extern unsigned int mk64_astra_rng_call_count(void);
+typedef struct {u32 h0,h1,h2,pos[3],oldPos[3],vel[3],speed,currentSpeed,size,previousSpeed,effects,triggers;u16 type,rank,lap,surface,path,character,kartProps,alpha;} AstraPlayerFrameR17;
+typedef struct {u32 valid,frame,globalTimer,gamestate,raceState,mode,screenMode,course,players,seed,rngCalls,courseTimerBits,vblankTimerBits,tickSpeed;AstraPlayerFrameR17 p[4];} AstraFrameR17;
+static AstraFrameR17 sAstraFrameR17[ASTRA_FRAME_HISTORY];
+static u32 astra_r17_u32(const void *p){u32 v;memcpy(&v,p,4);return v;} static u16 astra_r17_u16(const void *p){u16 v;memcpy(&v,p,2);return v;}
+static u32 astra_r17_hash(const unsigned char *p,unsigned n){u32 h=2166136261U;while(n--){h^=*p++;h*=16777619U;}return h;}
+static void astra_r17_player(AstraPlayerFrameR17 *o,const void *vp){const unsigned char *p=(const unsigned char*)vp;memset(o,0,sizeof(*o));o->h0=astra_r17_hash(p,0x100);o->h1=astra_r17_hash(p+0x100,0x100);o->h2=astra_r17_hash(p+0x200,0x58);o->type=astra_r17_u16(p);o->rank=astra_r17_u16(p+4);o->lap=astra_r17_u16(p+8);o->triggers=astra_r17_u32(p+0xC);o->pos[0]=astra_r17_u32(p+0x14);o->pos[1]=astra_r17_u32(p+0x18);o->pos[2]=astra_r17_u32(p+0x1C);o->oldPos[0]=astra_r17_u32(p+0x20);o->oldPos[1]=astra_r17_u32(p+0x24);o->oldPos[2]=astra_r17_u32(p+0x28);o->vel[0]=astra_r17_u32(p+0x34);o->vel[1]=astra_r17_u32(p+0x38);o->vel[2]=astra_r17_u32(p+0x3C);o->kartProps=astra_r17_u16(p+0x44);o->speed=astra_r17_u32(p+0x94);o->currentSpeed=astra_r17_u32(p+0x9C);o->effects=astra_r17_u32(p+0xBC);o->alpha=astra_r17_u16(p+0xC6);o->surface=astra_r17_u16(p+0xF8);o->path=astra_r17_u16(p+0x220);o->size=astra_r17_u32(p+0x224);o->previousSpeed=astra_r17_u32(p+0x22C);o->character=astra_r17_u16(p+0x254);}
+static void mk64_astra_diag_capture(void){extern u16 gRandomSeed16;extern int xbox_netplay_diagnostics_enabled(void);u32 f;AstraFrameR17 *r;int i;if(!xbox_netplay_active()||!xbox_netplay_diagnostics_enabled())return;f=xbox_netplay_frame();r=&sAstraFrameR17[f&(ASTRA_FRAME_HISTORY-1U)];memset(r,0,sizeof(*r));r->valid=1;r->frame=f;r->globalTimer=(u32)gGlobalTimer;r->gamestate=(u32)gGamestate;r->raceState=(u32)(u16)D_800DC510;r->mode=(u32)gModeSelection;r->screenMode=(u32)gScreenModeSelection;r->course=(u32)gCurrentCourseId;r->players=(u32)xbox_netplay_player_count();r->seed=(u32)gRandomSeed16;r->rngCalls=mk64_astra_rng_call_count();r->courseTimerBits=astra_r17_u32(&gCourseTimer);r->vblankTimerBits=astra_r17_u32(&gVBlankTimer);r->tickSpeed=(u32)gTickSpeed;for(i=0;i<4;i++)astra_r17_player(&r->p[i],&gPlayers[i]);}
+void mk64_astra_diag_dump(void){u32 cur,first,f;int i;if(!xbox_netplay_active())return;cur=xbox_netplay_frame();first=cur>32U?cur-32U:0;xbox_netplay_trace("ASTRA_FRAME_BEGIN SIDE=OG FIRST=%lu LAST=%lu\n",(unsigned long)first,(unsigned long)cur);for(f=first;f<=cur;f++){AstraFrameR17 *r=&sAstraFrameR17[f&(ASTRA_FRAME_HISTORY-1U)];if(!r->valid||r->frame!=f)continue;xbox_netplay_trace("ASTRA_FRAME SIDE=OG F=%lu GT=%lu GS=%lu RS=%lu MODE=%lu SM=%lu COURSE=%lu PC=%lu SEED=%04lX RNG=%lu CT=%08lX VT=%08lX TICK=%lu\n",(unsigned long)r->frame,(unsigned long)r->globalTimer,(unsigned long)r->gamestate,(unsigned long)r->raceState,(unsigned long)r->mode,(unsigned long)r->screenMode,(unsigned long)r->course,(unsigned long)r->players,(unsigned long)r->seed,(unsigned long)r->rngCalls,(unsigned long)r->courseTimerBits,(unsigned long)r->vblankTimerBits,(unsigned long)r->tickSpeed);for(i=0;i<2;i++){AstraPlayerFrameR17 *p=&r->p[i];xbox_netplay_trace("ASTRA_PLAYER SIDE=OG F=%lu P=%d H0=%08lX H1=%08lX H2=%08lX TYPE=%04X RANK=%04X LAP=%04X EFF=%08lX TRIG=%08lX POS=%08lX,%08lX,%08lX OLD=%08lX,%08lX,%08lX VEL=%08lX,%08lX,%08lX SPD=%08lX CUR=%08lX PREV=%08lX SIZE=%08lX SURF=%04X PATH=%04X CHAR=%04X KPROP=%04X ALPHA=%04X\n",(unsigned long)r->frame,i+1,(unsigned long)p->h0,(unsigned long)p->h1,(unsigned long)p->h2,p->type,p->rank,p->lap,(unsigned long)p->effects,(unsigned long)p->triggers,(unsigned long)p->pos[0],(unsigned long)p->pos[1],(unsigned long)p->pos[2],(unsigned long)p->oldPos[0],(unsigned long)p->oldPos[1],(unsigned long)p->oldPos[2],(unsigned long)p->vel[0],(unsigned long)p->vel[1],(unsigned long)p->vel[2],(unsigned long)p->speed,(unsigned long)p->currentSpeed,(unsigned long)p->previousSpeed,(unsigned long)p->size,p->surface,p->path,p->character,p->kartProps,p->alpha);}}xbox_netplay_trace("ASTRA_FRAME_END SIDE=OG\n");}
+#endif
+
+/* MK64_CROSSPLAY_R25_ASTRA_GOLD_TRACE
+ * ASTRA handoff trace. Diagnostic only: no RNG calls, no file I/O during
+ * gameplay, and no writes to simulation state. Title/demo races are excluded.
+ */
+#define R25_RING 2048U
+#define R25_WORDS 88
+typedef struct { u32 w[R25_WORDS]; } R25Rec;
+static R25Rec sR25Ring[R25_RING];
+static u32 sR25Total;
+static u32 r25_bits(f32 v){u32 b=0;memcpy(&b,&v,sizeof(b));return b;}
+static u32 r25_h32(u32 h,u32 v){h=(h^(u8)(v>>24))*16777619U;h=(h^(u8)(v>>16))*16777619U;h=(h^(u8)(v>>8))*16777619U;return(h^(u8)v)*16777619U;}
+static u32 r25_kin_hash(Player *p,int index){
+    u32 h=2166136261U;int j;
+    for(j=0;j<3;++j)h=r25_h32(h,r25_bits(p->pos[j]));
+    for(j=0;j<3;++j)h=r25_h32(h,r25_bits(p->velocity[j]));
+    h=r25_h32(h,r25_bits(p->speed));h=r25_h32(h,r25_bits(p->currentSpeed));h=r25_h32(h,r25_bits(p->previousSpeed));
+    for(j=0;j<3;++j)h=r25_h32(h,r25_bits(p->oldPos[j]));
+    h=r25_h32(h,(u32)(u16)p->rotation[1]);h=r25_h32(h,(u32)(u16)p->slopeAccel);
+    h=r25_h32(h,r25_bits(p->unk_098));h=r25_h32(h,r25_bits(p->unk_08C));h=r25_h32(h,r25_bits(p->boundingBoxSize));
+    h=r25_h32(h,r25_bits(p->collision.surfaceDistance[2]));
+    for(j=0;j<3;++j)h=r25_h32(h,r25_bits(p->collision.orientationVector[j]));
+    return h;
+}
+static u32 r25_logic_hash(Player *p,int index){
+    u32 h=2166136261U;(void)index;
+    h=r25_h32(h,(u32)(u16)p->type);h=r25_h32(h,(u32)(u16)p->lapCount);h=r25_h32(h,p->effects);
+    h=r25_h32(h,(u32)p->soundEffects);h=r25_h32(h,(u32)(u16)p->unk_044);h=r25_h32(h,(u32)(u16)p->currentRank);
+    h=r25_h32(h,(u32)(u16)p->nearestPathPointId);h=r25_h32(h,(u32)(u16)p->currentItemCopy);return h;
+}
+static void r25_detail(u32 *w,Player *p,struct Controller *c,int index){
+    w[0]=(u32)(u16)p->type;
+    w[1]=((u32)(u16)p->lapCount<<16)|(u16)p->currentRank;
+    w[2]=((u32)(u16)p->nearestPathPointId<<16)|(u16)p->currentItemCopy;
+    w[3]=p->effects;w[4]=(u32)p->soundEffects;w[5]=(u32)(u16)p->unk_044;
+    w[6]=r25_bits(p->pos[0]);w[7]=r25_bits(p->pos[1]);w[8]=r25_bits(p->pos[2]);
+    w[9]=r25_bits(p->velocity[0]);w[10]=r25_bits(p->velocity[1]);w[11]=r25_bits(p->velocity[2]);
+    w[12]=r25_bits(p->speed);w[13]=r25_bits(p->currentSpeed);w[14]=r25_bits(p->previousSpeed);
+    w[15]=r25_bits(p->oldPos[0]);w[16]=r25_bits(p->oldPos[1]);w[17]=r25_bits(p->oldPos[2]);
+    w[18]=((u32)(u16)p->rotation[1]<<16)|(u16)p->slopeAccel;
+    w[19]=r25_bits(p->unk_098);w[20]=r25_bits(p->unk_08C);w[21]=r25_bits(p->boundingBoxSize);
+    w[22]=r25_bits(p->collision.surfaceDistance[2]);w[23]=r25_bits(p->collision.orientationVector[0]);
+    w[24]=r25_bits(p->collision.orientationVector[1]);w[25]=r25_bits(p->collision.orientationVector[2]);
+    w[26]=r25_bits(p->unk_090);w[27]=0; /* reserved */
+    w[28]=((u32)(u16)c->button<<16)|((u32)(u8)c->rawStickX<<8)|(u8)c->rawStickY;
+    w[29]=((u32)(u16)c->buttonPressed<<16)|(u16)c->buttonDepressed;
+}
+/* R27 CPU trace: retain the first 1024 checkpoints plus the latest 2048.
+ * This preserves the first post-GO split even if the watchdog fires later.
+ * 672 KiB, no allocation, I/O, RNG calls or simulation writes during racing. */
+#define R27_ANCHOR 1024U
+#define R27_RECENT 2048U
+#define R27_WORDS 56U
+static u32 sR27Cpu[R27_ANCHOR + R27_RECENT][R27_WORDS];
+static u32 sR27CpuTotal, sR27Tick, sR27LastFrame;
+static int sR27RaceActive;
+static void r27_trace_frame(u32 tick) {
+    extern int xbox_netplay_diagnostics_enabled(void);
+    int active = xbox_netplay_diagnostics_enabled() && xbox_netplay_crossplay() && gDemoMode == DEMO_MODE_INACTIVE &&
+                 gGamestate == RACING && gModeSelection == GRAND_PRIX && D_800DC510 == 3;
+    u32 frame = (u32)xbox_netplay_frame();
+    sR27Tick = tick;
+    if (active && (!sR27RaceActive || frame < sR27LastFrame)) sR27CpuTotal = 0;
+    sR27RaceActive = active;
+    sR27LastFrame = frame;
+}
+void mk64_r27_cpu_checkpoint(unsigned int stage, int playerId) {
+    extern u16 gRandomSeed16;
+    extern int xbox_netplay_diagnostics_enabled(void);
+    u32 slot, *w; Player *p;
+    extern void mk64_r27_cpu_ai(unsigned int *w, int playerId);
+    if (!xbox_netplay_diagnostics_enabled() || !sR27RaceActive || playerId < 0 || playerId >= 8) return;
+    slot = sR27CpuTotal < R27_ANCHOR ? sR27CpuTotal :
+           R27_ANCHOR + ((sR27CpuTotal - R27_ANCHOR) & (R27_RECENT - 1U));
+    w = sR27Cpu[slot]; p = &gPlayers[playerId];
+    w[0] = (u32)xbox_netplay_frame(); w[1] = sR27Tick; w[2] = stage; w[3] = (u32)playerId;
+    w[4] = gRandomSeed16; w[5] = r25_bits(gCourseTimer); w[6] = r25_bits(gVBlankTimer);
+    w[7] = r25_kin_hash(p, playerId); w[8] = r25_logic_hash(p, playerId);
+    r25_detail(w + 9, p, &gControllers[0], playerId); /* CPU has no controller input. */
+    w[37] = 0; w[38] = 0;
+    mk64_r27_cpu_ai(w, playerId);
+    ++sR27CpuTotal;
+}
+unsigned int mk64_crossplay_r27_count(void) {
+    return sR27CpuTotal < R27_ANCHOR + R27_RECENT ? sR27CpuTotal : R27_ANCHOR + R27_RECENT;
+}
+int mk64_crossplay_r27_get(unsigned int index, unsigned int *out, int outCount) {
+    u32 slot, start;
+    if (!out || outCount < R27_WORDS || index >= mk64_crossplay_r27_count()) return 0;
+    if (index < R27_ANCHOR) slot = index;
+    else {
+        start = sR27CpuTotal > R27_ANCHOR + R27_RECENT ? sR27CpuTotal - R27_RECENT : R27_ANCHOR;
+        slot = R27_ANCHOR + ((start + index - 2U * R27_ANCHOR) & (R27_RECENT - 1U));
+    }
+    memcpy(out, sR27Cpu[slot], sizeof(sR27Cpu[slot])); return R27_WORDS;
+}
+
+static void r25_capture(u32 phase,u32 tick){
+    extern u16 gRandomSeed16;extern int xbox_netplay_diagnostics_enabled(void);R25Rec *r;u32 *w;int i;
+    if(!xbox_netplay_diagnostics_enabled())return;
+    r27_trace_frame(tick);
+    if(!xbox_netplay_crossplay() || gDemoMode!=DEMO_MODE_INACTIVE || gGamestate!=RACING || gModeSelection!=GRAND_PRIX)return;
+    r=&sR25Ring[sR25Total&(R25_RING-1U)];w=r->w;
+    w[0]=(u32)xbox_netplay_frame();w[1]=phase;w[2]=tick;w[3]=(u32)gGlobalTimer;w[4]=(u32)D_800DC510;w[5]=(u32)gRandomSeed16;
+    w[6]=r25_bits(gCourseTimer);w[7]=r25_bits(gVBlankTimer);w[8]=(u32)gDemoMode;w[9]=(u32)(u16)gTickSpeed;
+    w[10]=(u32)gPlayerCountSelection1;w[11]=((u32)(u16)gActiveScreenMode<<16)|(u16)gModeSelection;
+    for(i=0;i<8;++i)w[12+i]=r25_kin_hash(&gPlayers[i],i);
+    for(i=0;i<8;++i)w[20+i]=r25_logic_hash(&gPlayers[i],i);
+    r25_detail(&w[28],&gPlayers[0],&gControllers[0],0);r25_detail(&w[58],&gPlayers[1],&gControllers[1],1);
+    ++sR25Total;
+}
+unsigned int xbox_crossplay_r25_count(void){return sR25Total<R25_RING?sR25Total:R25_RING;}
+int xbox_crossplay_r25_get(unsigned int index,unsigned int *out,int outCount){
+    u32 n,start,pos;if(!out||outCount<R25_WORDS)return 0;n=xbox_crossplay_r25_count();if(index>=n)return 0;
+    start=sR25Total-n;pos=(start+index)&(R25_RING-1U);memcpy(out,sR25Ring[pos].w,sizeof(sR25Ring[pos].w));return R25_WORDS;
+}
+unsigned int xbox_netplay_state_hash(void){
+    extern u16 gRandomSeed16;
+    u32 h=2166136261U;int i,j,players=xbox_netplay_player_count();
+    mk64_astra_diag_capture();
+    if(players<2)players=2;if(players>4)players=4;
+    if(xbox_netplay_crossplay() && gDemoMode==DEMO_MODE_INACTIVE && gGamestate==RACING && gModeSelection==GRAND_PRIX)players=8; /* R25: real GP only */
+    if(xbox_netplay_crossplay() && (gDemoMode!=DEMO_MODE_INACTIVE || gGamestate!=RACING || D_800DC510!=3)){
+        unsigned char state[XPLAY_STATE_BYTES];
+        int n=xbox_crossplay_state_pack(state,sizeof(state));
+        for(i=0;i<n;++i)h=cross_hash_u8(h,state[i]);
+        return h;
+    }
+    if(xbox_netplay_crossplay() && gGamestate==RACING){
+        /* R27: retain existing checks and add exact gameplay bits for real GP.
+         * A one-ULP movement difference must reach the watchdog immediately. */
+        h = cross_r18_race_hash(h,players);
+        if (gModeSelection == GRAND_PRIX && D_800DC510 == 3 && gDemoMode == DEMO_MODE_INACTIVE) {
+            h = r25_h32(h, (u32)gRandomSeed16);
+            h = r25_h32(h, r25_bits(gCourseTimer));
+            h = r25_h32(h, r25_bits(gVBlankTimer));
+            for (i = 0; i < 8; ++i) {
+                h = r25_h32(h, r25_kin_hash(&gPlayers[i], i));
+                h = r25_h32(h, r25_logic_hash(&gPlayers[i], i));
+            }
+        }
+        return h;
+    }
+    h=cross_hash_u32(h,(u32)gGlobalTimer);
+    h=cross_phase_hash(h);
+    if(gGamestate==RACING){
+        h=cross_hash_f32(h,gCourseTimer);
+        h=cross_hash_f32(h,gVBlankTimer);
+        h=cross_hash_u16(h,gRandomSeed16);
+        for(i=0;i<players;++i){
+            h=cross_hash_u16(h,gPlayers[i].type);
+            h=cross_hash_u16(h,(u16)gPlayers[i].lapCount);
+            h=cross_hash_u32(h,gPlayers[i].effects);
+            for(j=0;j<3;++j)h=cross_hash_f32(h,gPlayers[i].pos[j]);
+            for(j=0;j<3;++j)h=cross_hash_f32(h,gPlayers[i].velocity[j]);
+        }
+    }
+    return h;
+}
+#endif
 
 static void send_display_list(struct SPTask *spTask) {
     gfx_run((Gfx *)spTask->task.t.data_ptr);
@@ -1181,6 +1798,15 @@ void update_controller(s32 index) {
 
 void read_controllers(void) {
     OSMesg msg;
+#if defined(TARGET_XBOX)
+    u16 net_prev_button[4];
+    u16 net_prev_stick[4];
+    int net_i;
+    for (net_i = 0; net_i < 4; ++net_i) {
+        net_prev_button[net_i] = gControllers[net_i].button;
+        net_prev_stick[net_i] = gControllers[net_i].stickDirection;
+    }
+#endif
 
     osRecvMesg(&gSIEventMesgQueue, &msg, OS_MESG_BLOCK);
 
@@ -1188,6 +1814,73 @@ void read_controllers(void) {
     update_controller(1);
     update_controller(2);
     update_controller(3);
+#if defined(TARGET_XBOX)
+    if (xbox_netplay_active()) {
+        /* Match the Xbox 360 netplay clock exactly.  The normal platform
+         * vblank cadence is presentation timing; online simulation time is
+         * derived from the synchronized input frame so OG/360 cannot drift
+         * merely because their video loops run at slightly different times. */
+        gVBlankTimer = r22_crossplay_frame_time(xbox_netplay_frame());
+
+        struct XboxNetPadCompat {
+            u16 button;
+            s8 stick_x;
+            s8 stick_y;
+            u8 err_no;
+        } pads[4];
+
+        memset(pads, 0, sizeof(pads));
+        for (net_i = 0; net_i < 4; ++net_i) {
+            int sx = (int)gControllers[net_i].rawStickX;
+            int sy = (int)gControllers[net_i].rawStickY;
+            if (sx < -128) sx = -128; if (sx > 127) sx = 127;
+            if (sy < -128) sy = -128; if (sy > 127) sy = 127;
+            /* update_controller() leaves the previous sample intact when a
+             * physical controller disappears. Tell netplay explicitly whether
+             * this physical port is present so a disconnected local pad cannot
+             * keep sending stale held buttons/steering. Remote logical pads are
+             * overwritten by xbox_netplay_controllers() after lockstep. */
+            if (maple_enum_type(net_i, MAPLE_FUNC_CONTROLLER) != NULL) {
+                pads[net_i].button = gControllers[net_i].button;
+                pads[net_i].stick_x = (s8)sx;
+                pads[net_i].stick_y = (s8)sy;
+                pads[net_i].err_no = 0;
+            } else {
+                pads[net_i].button = 0;
+                pads[net_i].stick_x = 0;
+                pads[net_i].stick_y = 0;
+                pads[net_i].err_no = 1;
+            }
+        }
+
+        xbox_netplay_controllers(pads, 4);
+
+        /* update_controller() sampled physical pads above. Replace that sample
+         * with the synchronized frame and rebuild edge-triggered fields from
+         * the previous synchronized frame, not from the temporary local one. */
+        for (net_i = 0; net_i < 4; ++net_i) {
+            struct Controller *controller = &gControllers[net_i];
+            u16 now_button = pads[net_i].err_no ? 0 : pads[net_i].button;
+            u16 now_stick = 0;
+
+            controller->rawStickX = pads[net_i].err_no ? 0 : pads[net_i].stick_x;
+            controller->rawStickY = pads[net_i].err_no ? 0 : pads[net_i].stick_y;
+            controller->buttonPressed = now_button & (now_button ^ net_prev_button[net_i]);
+            controller->buttonDepressed = net_prev_button[net_i] & (now_button ^ net_prev_button[net_i]);
+            controller->button = now_button;
+
+            if (controller->rawStickX < -50) now_stick |= L_JPAD;
+            if (controller->rawStickX > 50) now_stick |= R_JPAD;
+            if (controller->rawStickY < -50) now_stick |= D_JPAD;
+            if (controller->rawStickY > 50) now_stick |= U_JPAD;
+            controller->stickPressed = now_stick & (now_stick ^ net_prev_stick[net_i]);
+            controller->stickDepressed = net_prev_stick[net_i] & (now_stick ^ net_prev_stick[net_i]);
+            controller->stickDirection = now_stick;
+        }
+    } else {
+        xbox_netplay_pump();
+    }
+#endif
     gControllerFive->button = (s16) (((gControllerOne->button | gControllerTwo->button) | gControllerThree->button) |
                                      gControllerFour->button);
     gControllerFive->buttonPressed =
@@ -1952,9 +2645,21 @@ void game_init_clear_framebuffer(void) {
     clear_framebuffer(0);
 }
 extern int force_30fps;
+static void r25_capture(u32 phase,u32 tick);
 void race_logic_loop(void) {
     s16 i;
     u16 rotY;
+#if defined(TARGET_XBOX)
+    static int r12RaceFrames = 0;
+    int r12Trace = xbox_netplay_active() && r12RaceFrames < 12;
+    if (r12Trace)
+        xbox_netplay_trace("R12_RACE %d ENTER net=%u rs=%u activeSM=%d selSM=%d pc=%d mode=%d course=%d pause=%u quit=%u p1=(%.2f,%.2f,%.2f) p2=(%.2f,%.2f,%.2f)\n",
+                           r12RaceFrames, xbox_netplay_frame(), (unsigned)D_800DC510, (int)gActiveScreenMode,
+                           (int)gScreenModeSelection, (int)gPlayerCountSelection1, (int)gModeSelection,
+                           (int)gCurrentCourseId, (unsigned)gIsGamePaused, (unsigned)gIsInQuitToMenuTransition,
+                           gPlayers[0].pos[0], gPlayers[0].pos[1], gPlayers[0].pos[2],
+                           gPlayers[1].pos[0], gPlayers[1].pos[1], gPlayers[1].pos[2]);
+#endif
 
 #if defined(TARGET_XBOX) && MK64X_DEBUG_TOOLS
     /* Watermark: report frames that maxed the ORIGINAL 128-entry mtxObject
@@ -1982,13 +2687,23 @@ void race_logic_loop(void) {
         return;
     }
 
+#if defined(TARGET_XBOX)
+    if (xbox_netplay_active()) sNumVBlanks = 2;
+#endif
     if (sNumVBlanks >= 6) {
         sNumVBlanks = 5;
     }
     if (sNumVBlanks < 0) {
         sNumVBlanks = 1;
     }
+#if defined(TARGET_XBOX)
+    if (r12Trace) xbox_netplay_trace("R12_RACE %d PRE 802A4EF4\n", r12RaceFrames);
+#endif
     func_802A4EF4();
+    r25_capture(1,0xFFFFFFFFU);
+#if defined(TARGET_XBOX)
+    if (r12Trace) xbox_netplay_trace("R12_RACE %d POST 802A4EF4\n", r12RaceFrames);
+#endif
     
     //gTickSpeed = 2;
     gTickSpeed = 1;
@@ -2025,19 +2740,35 @@ void race_logic_loop(void) {
                         gCourseTimer += COURSE_TIMER_ITER;
                     }
                     func_802909F0();
+                    r25_capture(10,(u32)i);
                     evaluate_collision_for_players_and_actors();
+                    r25_capture(11,(u32)i);
                     func_800382DC();
+                    r25_capture(12,(u32)i);
                     func_8001EE98(gPlayerOneCopy, camera1, 0);
+                    r25_capture(13,(u32)i);
                     func_80028F70();
                     func_8028F474();
+                    r25_capture(17,(u32)i);
                     func_80059AC8();
+                    r25_capture(18,(u32)i);
                     update_course_actors();
+                    r25_capture(19,(u32)i);
                     course_update_water();
+                    r25_capture(20,(u32)i);
                     func_8028FCBC();
+                    r25_capture(21,(u32)i);
                 }
                 func_80022744();
+                r25_capture(30,0xFFFFFFFFU);
             }
             func_8005A070();
+            r25_capture(31,0xFFFFFFFFU);
+#if defined(TARGET_XBOX)
+            /* R22: everything after func_8005A070() is presentation.  The item
+             * window/object update above remains authoritative gameplay. */
+            r22_crossplay_present_begin();
+#endif
             sNumVBlanks = 0;
             ////profiler_log_thread5_time(LEVEL_SCRIPT_EXECUTE);
             D_8015F788 = 0;
@@ -2077,6 +2808,9 @@ void race_logic_loop(void) {
 
         case SCREEN_MODE_2P_SPLITSCREEN_VERTICAL:
             force_30fps = 1;
+#if defined(TARGET_XBOX)
+            if (r12Trace) xbox_netplay_trace("R12_RACE %d 2PV branch enter sNumVBlanks=%d\n", r12RaceFrames, (int)sNumVBlanks);
+#endif
 
             /* if (gCurrentCourseId == COURSE_DK_JUNGLE) {
                 gTickSpeed = 3;
@@ -2090,29 +2824,113 @@ void race_logic_loop(void) {
             // Game speed stays correct at either rate, and frames that reach 30fps
             // automatically get the smooth 2-tick treatment as renderer perf improves.
             // Clamped [2,4]: 4 = the N64's own DK-Jungle-in-4P floor, also covers spikes.
+            #if defined(TARGET_XBOX)
+            gTickSpeed = xbox_netplay_active() ? 2 :
+                ((sNumVBlanks < 2) ? 2 : ((sNumVBlanks > 4) ? 4 : sNumVBlanks));
+#else
             gTickSpeed = (sNumVBlanks < 2) ? 2 : ((sNumVBlanks > 4) ? 4 : sNumVBlanks);
+#endif
 
             if (gIsGamePaused == 0) {
                 for (i = 0; i < gTickSpeed; i++) {
                     if (D_8015011E != 0) {
                         gCourseTimer += COURSE_TIMER_ITER;
                     }
+#if defined(TARGET_XBOX)
+                    if (r12Trace && i == 0) xbox_netplay_trace("R12_RACE %d 2PV PRE 802909F0\n", r12RaceFrames);
+#endif
                     func_802909F0();
+                    r25_capture(10,(u32)i);
+#if defined(TARGET_XBOX)
+                    if (r12Trace && i == 0) xbox_netplay_trace("R12_RACE %d 2PV POST 802909F0\n", r12RaceFrames);
+#endif
+#if defined(TARGET_XBOX)
+                    if (r12Trace && i == 0) xbox_netplay_trace("R12_RACE %d 2PV PRE collision\n", r12RaceFrames);
+#endif
                     evaluate_collision_for_players_and_actors();
+                    r25_capture(11,(u32)i);
+#if defined(TARGET_XBOX)
+                    if (r12Trace && i == 0) xbox_netplay_trace("R12_RACE %d 2PV POST collision\n", r12RaceFrames);
+#endif
+#if defined(TARGET_XBOX)
+                    if (r12Trace && i == 0) xbox_netplay_trace("R12_RACE %d 2PV PRE 800382DC\n", r12RaceFrames);
+#endif
                     func_800382DC();
+                    r25_capture(12,(u32)i);
+#if defined(TARGET_XBOX)
+                    if (r12Trace && i == 0) xbox_netplay_trace("R12_RACE %d 2PV POST 800382DC\n", r12RaceFrames);
+#endif
                     func_8001EE98(gPlayerOneCopy, camera1, 0);
+                    r25_capture(13,(u32)i);
                     func_80029060();
+                    r25_capture(14,(u32)i);
                     func_8001EE98(gPlayerTwoCopy, camera2, 1);
+                    r25_capture(15,(u32)i);
                     func_80029150();
+                    r25_capture(16,(u32)i);
+#if defined(TARGET_XBOX)
+                    if (r12Trace && i == 0) xbox_netplay_trace("R12_RACE %d 2PV PRE 8028F474\n", r12RaceFrames);
+#endif
                     func_8028F474();
+                    r25_capture(17,(u32)i);
+#if defined(TARGET_XBOX)
+                    if (r12Trace && i == 0) xbox_netplay_trace("R12_RACE %d 2PV POST 8028F474\n", r12RaceFrames);
+#endif
+#if defined(TARGET_XBOX)
+                    if (r12Trace && i == 0) xbox_netplay_trace("R12_RACE %d 2PV PRE 80059AC8\n", r12RaceFrames);
+#endif
                     func_80059AC8();
+                    r25_capture(18,(u32)i);
+#if defined(TARGET_XBOX)
+                    if (r12Trace && i == 0) xbox_netplay_trace("R12_RACE %d 2PV POST 80059AC8\n", r12RaceFrames);
+#endif
+#if defined(TARGET_XBOX)
+                    if (r12Trace && i == 0) xbox_netplay_trace("R12_RACE %d 2PV PRE course_actors\n", r12RaceFrames);
+#endif
                     update_course_actors();
+                    r25_capture(19,(u32)i);
+#if defined(TARGET_XBOX)
+                    if (r12Trace && i == 0) xbox_netplay_trace("R12_RACE %d 2PV POST course_actors\n", r12RaceFrames);
+#endif
+#if defined(TARGET_XBOX)
+                    if (r12Trace && i == 0) xbox_netplay_trace("R12_RACE %d 2PV PRE water\n", r12RaceFrames);
+#endif
                     course_update_water();
+                    r25_capture(20,(u32)i);
+#if defined(TARGET_XBOX)
+                    if (r12Trace && i == 0) xbox_netplay_trace("R12_RACE %d 2PV POST water\n", r12RaceFrames);
+#endif
+#if defined(TARGET_XBOX)
+                    if (r12Trace && i == 0) xbox_netplay_trace("R12_RACE %d 2PV PRE 8028FCBC\n", r12RaceFrames);
+#endif
                     func_8028FCBC();
+                    r25_capture(21,(u32)i);
+#if defined(TARGET_XBOX)
+                    if (r12Trace && i == 0) xbox_netplay_trace("R12_RACE %d 2PV POST 8028FCBC\n", r12RaceFrames);
+#endif
                 }
+#if defined(TARGET_XBOX)
+                if (r12Trace) xbox_netplay_trace("R12_RACE %d 2PV PRE 80022744\n", r12RaceFrames);
+#endif
                 func_80022744();
+                r25_capture(30,0xFFFFFFFFU);
+#if defined(TARGET_XBOX)
+                if (r12Trace) xbox_netplay_trace("R12_RACE %d 2PV POST 80022744\n", r12RaceFrames);
+#endif
             }
+#if defined(TARGET_XBOX)
+            if (r12Trace) xbox_netplay_trace("R12_RACE %d 2PV PRE 8005A070\n", r12RaceFrames);
+#endif
             func_8005A070();
+            r25_capture(31,0xFFFFFFFFU);
+#if defined(TARGET_XBOX)
+            /* R22: everything after func_8005A070() is presentation.  The item
+             * window/object update above remains authoritative gameplay. */
+            r22_crossplay_present_begin();
+#endif
+#if defined(TARGET_XBOX)
+            if (r12Trace) xbox_netplay_trace("R12_RACE %d 2PV POST 8005A070\n", r12RaceFrames);
+#endif
             ////profiler_log_thread5_time(LEVEL_SCRIPT_EXECUTE);
             sNumVBlanks = 0;
             move_segment_table_to_dmem();
@@ -2122,16 +2940,43 @@ void race_logic_loop(void) {
             }
             D_8015F788 = 0;
             if (gPlayerWinningIndex == 0) {
+#if defined(TARGET_XBOX)
+                if (r12Trace) xbox_netplay_trace("R12_RACE %d 2PV PRE renderP2V\n", r12RaceFrames);
+#endif
                 render_player_two_2p_screen_vertical();
+#if defined(TARGET_XBOX)
+                if (r12Trace) xbox_netplay_trace("R12_RACE %d 2PV POST renderP2V\n", r12RaceFrames);
+#endif
+#if defined(TARGET_XBOX)
+                if (r12Trace) xbox_netplay_trace("R12_RACE %d 2PV PRE renderP1V\n", r12RaceFrames);
+#endif
                 render_player_one_2p_screen_vertical();
+#if defined(TARGET_XBOX)
+                if (r12Trace) xbox_netplay_trace("R12_RACE %d 2PV POST renderP1V\n", r12RaceFrames);
+#endif
             } else {
+#if defined(TARGET_XBOX)
+                if (r12Trace) xbox_netplay_trace("R12_RACE %d 2PV PRE renderP1V\n", r12RaceFrames);
+#endif
                 render_player_one_2p_screen_vertical();
+#if defined(TARGET_XBOX)
+                if (r12Trace) xbox_netplay_trace("R12_RACE %d 2PV POST renderP1V\n", r12RaceFrames);
+#endif
+#if defined(TARGET_XBOX)
+                if (r12Trace) xbox_netplay_trace("R12_RACE %d 2PV PRE renderP2V\n", r12RaceFrames);
+#endif
                 render_player_two_2p_screen_vertical();
+#if defined(TARGET_XBOX)
+                if (r12Trace) xbox_netplay_trace("R12_RACE %d 2PV POST renderP2V\n", r12RaceFrames);
+#endif
             }
             break;
 
         case SCREEN_MODE_2P_SPLITSCREEN_HORIZONTAL:
             force_30fps = 1;
+#if defined(TARGET_XBOX)
+            if (r12Trace) xbox_netplay_trace("R12_RACE %d 2PH branch enter sNumVBlanks=%d\n", r12RaceFrames, (int)sNumVBlanks);
+#endif
 
              /* if (gCurrentCourseId == COURSE_DK_JUNGLE ||
                 gCurrentCourseId == COURSE_TOADS_TURNPIKE) {
@@ -2146,31 +2991,115 @@ void race_logic_loop(void) {
             // Game speed stays correct at either rate, and frames that reach 30fps
             // automatically get the smooth 2-tick treatment as renderer perf improves.
             // Clamped [2,4]: 4 = the N64's own DK-Jungle-in-4P floor, also covers spikes.
+            #if defined(TARGET_XBOX)
+            gTickSpeed = xbox_netplay_active() ? 2 :
+                ((sNumVBlanks < 2) ? 2 : ((sNumVBlanks > 4) ? 4 : sNumVBlanks));
+#else
             gTickSpeed = (sNumVBlanks < 2) ? 2 : ((sNumVBlanks > 4) ? 4 : sNumVBlanks);
+#endif
 
             if (gIsGamePaused == 0) {
                 for (i = 0; i < gTickSpeed; i++) {
                     if (D_8015011E != 0) {
                         gCourseTimer += COURSE_TIMER_ITER;
                     }
+#if defined(TARGET_XBOX)
+                    if (r12Trace && i == 0) xbox_netplay_trace("R12_RACE %d 2PH PRE 802909F0\n", r12RaceFrames);
+#endif
                     func_802909F0();
+                    r25_capture(10,(u32)i);
+#if defined(TARGET_XBOX)
+                    if (r12Trace && i == 0) xbox_netplay_trace("R12_RACE %d 2PH POST 802909F0\n", r12RaceFrames);
+#endif
+#if defined(TARGET_XBOX)
+                    if (r12Trace && i == 0) xbox_netplay_trace("R12_RACE %d 2PH PRE collision\n", r12RaceFrames);
+#endif
                     evaluate_collision_for_players_and_actors();
+                    r25_capture(11,(u32)i);
+#if defined(TARGET_XBOX)
+                    if (r12Trace && i == 0) xbox_netplay_trace("R12_RACE %d 2PH POST collision\n", r12RaceFrames);
+#endif
+#if defined(TARGET_XBOX)
+                    if (r12Trace && i == 0) xbox_netplay_trace("R12_RACE %d 2PH PRE 800382DC\n", r12RaceFrames);
+#endif
                     func_800382DC();
+                    r25_capture(12,(u32)i);
+#if defined(TARGET_XBOX)
+                    if (r12Trace && i == 0) xbox_netplay_trace("R12_RACE %d 2PH POST 800382DC\n", r12RaceFrames);
+#endif
                     func_8001EE98(gPlayerOneCopy, camera1, 0);
+                    r25_capture(13,(u32)i);
                     func_80029060();
+                    r25_capture(14,(u32)i);
                     func_8001EE98(gPlayerTwoCopy, camera2, 1);
+                    r25_capture(15,(u32)i);
                     func_80029150();
+                    r25_capture(16,(u32)i);
+#if defined(TARGET_XBOX)
+                    if (r12Trace && i == 0) xbox_netplay_trace("R12_RACE %d 2PH PRE 8028F474\n", r12RaceFrames);
+#endif
                     func_8028F474();
+                    r25_capture(17,(u32)i);
+#if defined(TARGET_XBOX)
+                    if (r12Trace && i == 0) xbox_netplay_trace("R12_RACE %d 2PH POST 8028F474\n", r12RaceFrames);
+#endif
+#if defined(TARGET_XBOX)
+                    if (r12Trace && i == 0) xbox_netplay_trace("R12_RACE %d 2PH PRE 80059AC8\n", r12RaceFrames);
+#endif
                     func_80059AC8();
+                    r25_capture(18,(u32)i);
+#if defined(TARGET_XBOX)
+                    if (r12Trace && i == 0) xbox_netplay_trace("R12_RACE %d 2PH POST 80059AC8\n", r12RaceFrames);
+#endif
+#if defined(TARGET_XBOX)
+                    if (r12Trace && i == 0) xbox_netplay_trace("R12_RACE %d 2PH PRE course_actors\n", r12RaceFrames);
+#endif
                     update_course_actors();
+                    r25_capture(19,(u32)i);
+#if defined(TARGET_XBOX)
+                    if (r12Trace && i == 0) xbox_netplay_trace("R12_RACE %d 2PH POST course_actors\n", r12RaceFrames);
+#endif
+#if defined(TARGET_XBOX)
+                    if (r12Trace && i == 0) xbox_netplay_trace("R12_RACE %d 2PH PRE water\n", r12RaceFrames);
+#endif
                     course_update_water();
+                    r25_capture(20,(u32)i);
+#if defined(TARGET_XBOX)
+                    if (r12Trace && i == 0) xbox_netplay_trace("R12_RACE %d 2PH POST water\n", r12RaceFrames);
+#endif
+#if defined(TARGET_XBOX)
+                    if (r12Trace && i == 0) xbox_netplay_trace("R12_RACE %d 2PH PRE 8028FCBC\n", r12RaceFrames);
+#endif
                     func_8028FCBC();
+                    r25_capture(21,(u32)i);
+#if defined(TARGET_XBOX)
+                    if (r12Trace && i == 0) xbox_netplay_trace("R12_RACE %d 2PH POST 8028FCBC\n", r12RaceFrames);
+#endif
                 }
+#if defined(TARGET_XBOX)
+                if (r12Trace) xbox_netplay_trace("R12_RACE %d 2PH PRE 80022744\n", r12RaceFrames);
+#endif
                 func_80022744();
+                r25_capture(30,0xFFFFFFFFU);
+#if defined(TARGET_XBOX)
+                if (r12Trace) xbox_netplay_trace("R12_RACE %d 2PH POST 80022744\n", r12RaceFrames);
+#endif
             }
             ////profiler_log_thread5_time(LEVEL_SCRIPT_EXECUTE);
             sNumVBlanks = (u16) 0;
+#if defined(TARGET_XBOX)
+            if (r12Trace) xbox_netplay_trace("R12_RACE %d 2PH PRE 8005A070\n", r12RaceFrames);
+#endif
             func_8005A070();
+            r25_capture(31,0xFFFFFFFFU);
+#if defined(TARGET_XBOX)
+            /* R22: everything after func_8005A070() is presentation.  The item
+             * window/object update above remains authoritative gameplay. */
+            r22_crossplay_present_begin();
+#endif
+#if defined(TARGET_XBOX)
+            if (r12Trace) xbox_netplay_trace("R12_RACE %d 2PH POST 8005A070\n", r12RaceFrames);
+#endif
             move_segment_table_to_dmem();
             init_rdp();
             if (D_800DC5B0 != 0) {
@@ -2178,11 +3107,35 @@ void race_logic_loop(void) {
             }
             D_8015F788 = 0;
             if (gPlayerWinningIndex == 0) {
+#if defined(TARGET_XBOX)
+                if (r12Trace) xbox_netplay_trace("R12_RACE %d 2PH PRE renderP2H\n", r12RaceFrames);
+#endif
                 render_player_two_2p_screen_horizontal();
+#if defined(TARGET_XBOX)
+                if (r12Trace) xbox_netplay_trace("R12_RACE %d 2PH POST renderP2H\n", r12RaceFrames);
+#endif
+#if defined(TARGET_XBOX)
+                if (r12Trace) xbox_netplay_trace("R12_RACE %d 2PH PRE renderP1H\n", r12RaceFrames);
+#endif
                 render_player_one_2p_screen_horizontal();
+#if defined(TARGET_XBOX)
+                if (r12Trace) xbox_netplay_trace("R12_RACE %d 2PH POST renderP1H\n", r12RaceFrames);
+#endif
             } else {
+#if defined(TARGET_XBOX)
+                if (r12Trace) xbox_netplay_trace("R12_RACE %d 2PH PRE renderP1H\n", r12RaceFrames);
+#endif
                 render_player_one_2p_screen_horizontal();
+#if defined(TARGET_XBOX)
+                if (r12Trace) xbox_netplay_trace("R12_RACE %d 2PH POST renderP1H\n", r12RaceFrames);
+#endif
+#if defined(TARGET_XBOX)
+                if (r12Trace) xbox_netplay_trace("R12_RACE %d 2PH PRE renderP2H\n", r12RaceFrames);
+#endif
                 render_player_two_2p_screen_horizontal();
+#if defined(TARGET_XBOX)
+                if (r12Trace) xbox_netplay_trace("R12_RACE %d 2PH POST renderP2H\n", r12RaceFrames);
+#endif
             }
 
             break;
@@ -2225,7 +3178,12 @@ void race_logic_loop(void) {
             // Game speed stays correct at either rate, and frames that reach 30fps
             // automatically get the smooth 2-tick treatment as renderer perf improves.
             // Clamped [2,4]: 4 = the N64's own DK-Jungle-in-4P floor, also covers spikes.
+            #if defined(TARGET_XBOX)
+            gTickSpeed = xbox_netplay_active() ? 2 :
+                ((sNumVBlanks < 2) ? 2 : ((sNumVBlanks > 4) ? 4 : sNumVBlanks));
+#else
             gTickSpeed = (sNumVBlanks < 2) ? 2 : ((sNumVBlanks > 4) ? 4 : sNumVBlanks);
+#endif
 
             if (gIsGamePaused == 0) {
                 for (i = 0; i < gTickSpeed; i++) {
@@ -2233,9 +3191,13 @@ void race_logic_loop(void) {
                         gCourseTimer += COURSE_TIMER_ITER;
                     }
                     func_802909F0();
+                    r25_capture(10,(u32)i);
                     evaluate_collision_for_players_and_actors();
+                    r25_capture(11,(u32)i);
                     func_800382DC();
+                    r25_capture(12,(u32)i);
                     func_8001EE98(gPlayerOneCopy, camera1, 0);
+                    r25_capture(13,(u32)i);
                     func_80029158();
                     func_8001EE98(gPlayerTwo, camera2, 1);
                     func_800291E8();
@@ -2244,14 +3206,26 @@ void race_logic_loop(void) {
                     func_8001EE98(gPlayerFour, camera4, 3);
                     func_800291F8();
                     func_8028F474();
+                    r25_capture(17,(u32)i);
                     func_80059AC8();
+                    r25_capture(18,(u32)i);
                     update_course_actors();
+                    r25_capture(19,(u32)i);
                     course_update_water();
+                    r25_capture(20,(u32)i);
                     func_8028FCBC();
+                    r25_capture(21,(u32)i);
                 }
                 func_80022744();
+                r25_capture(30,0xFFFFFFFFU);
             }
             func_8005A070();
+            r25_capture(31,0xFFFFFFFFU);
+#if defined(TARGET_XBOX)
+            /* R22: everything after func_8005A070() is presentation.  The item
+             * window/object update above remains authoritative gameplay. */
+            r22_crossplay_present_begin();
+#endif
             sNumVBlanks = 0;
             ////profiler_log_thread5_time(LEVEL_SCRIPT_EXECUTE);
             move_segment_table_to_dmem();
@@ -2301,13 +3275,33 @@ void race_logic_loop(void) {
         }
     }
     draw_splitscreen_separators();
+#if defined(TARGET_XBOX)
+    /* R41: native-proportion local fullscreen HUD. Offline/multi-local fall
+     * straight through to MK64's stock frame-end HUD. */
+    if (!xbox_render_online_local_hud()) {
+        func_800591B4();
+    }
+#else
     func_800591B4();
+#endif
     func_80093E20();
 #if DVDL
     display_dvdl();
 #endif
+#if defined(TARGET_XBOX)
+    /* Discard render/particle/culling side effects before the next lockstep frame. */
+    r22_crossplay_present_end();
+    r25_capture(32,0xFFFFFFFFU);
+#endif
     gDPFullSync(gDisplayListHead++);
     gSPEndDisplayList(gDisplayListHead++);
+#if defined(TARGET_XBOX)
+    if (r12Trace) {
+        xbox_netplay_trace("R12_RACE %d EXIT rs=%u tick=%d CT=%.3f VT=%.3f\n",
+                           r12RaceFrames, (unsigned)D_800DC510, (int)gTickSpeed, gCourseTimer, gVBlankTimer);
+        r12RaceFrames++;
+    }
+#endif
 }
 
 /**
@@ -2418,8 +3412,16 @@ void start_gfx_sptask(void) {
 }
 
 void handle_vblank(void) {
+#if defined(TARGET_XBOX)
+    /* Online simulation time is driven only by consumed network frames. */
+    if (!xbox_netplay_active()) {
+        gVBlankTimer += V_BlANK_TIMER_ITER;
+        sNumVBlanks++;
+    }
+#else
     gVBlankTimer += V_BlANK_TIMER_ITER;
     sNumVBlanks++;
+#endif
 
     receive_new_tasks();
 
@@ -2606,7 +3608,13 @@ void update_gamestate(void) {
             gCurrentlyLoadedCourseId = COURSE_NULL;
             break;
         case RACING:
+#if defined(TARGET_XBOX)
+            xbox_netplay_trace("R12_UPDATE_STATE RACING PRE setup_race\n");
+#endif
             setup_race();
+#if defined(TARGET_XBOX)
+            xbox_netplay_trace("R12_UPDATE_STATE RACING POST setup_race\n");
+#endif
             break;
         case ENDING:
             gCurrentlyLoadedCourseId = COURSE_NULL;
@@ -2628,11 +3636,19 @@ void vblfunc(uint32_t c, void *d) {
 	(void)c;
 	(void)d;
     vblticker++;
-    /* Drive the game's vblank timing from the real 60Hz DC vblank.
-       On N64 these advanced in handle_vblank() (the VI interrupt handler),
-       which is dead on DC (#if 0 thread3_video), so they were stuck. */
+    /* Drive offline timing from the real 60 Hz platform vblank. During
+       netplay, however, the Xbox 360 reference build derives gVBlankTimer
+       exclusively from the consumed network frame. Keeping this increment
+       online let OG Xbox transition/menu/object timers run ahead of the 360. */
+#if defined(TARGET_XBOX)
+    if (!xbox_netplay_active()) {
+        gVBlankTimer += V_BlANK_TIMER_ITER;
+        sNumVBlanks++;
+    }
+#else
     gVBlankTimer += V_BlANK_TIMER_ITER;
     sNumVBlanks++;
+#endif
     genwait_wake_all((void *)&vblticker);
 }
 
@@ -2646,6 +3662,21 @@ void thread5_game_loop(UNUSED void* arg) {
     osCreateMesgQueue(&gGameVblankQueue, &gGameMesgBuf, 1);
 
     init_controllers();
+#if defined(TARGET_XBOX)
+    /* R2: the online menu is intentionally AFTER graphics + controller init.
+     * Offline never initializes XNet. Host/Join initialize networking only
+     * after the player selects them. */
+    xbox_netplay_boot_menu();
+    if (xbox_netplay_active()) {
+        /* Xbox 360's online osContInit reports every negotiated racer as a
+         * connected logical N64 controller.  Our safe OG menu runs after
+         * init_controllers(), so reproduce that result here instead. */
+        unsigned net_players = (unsigned)xbox_netplay_player_count();
+        if (net_players > 4U) net_players = 4U;
+        gControllerBits = (u8)((1U << net_players) - 1U);
+        sIsController1Unplugged = 0;
+    }
+#endif
     if (!wasSoftReset) {
         clear_nmi_buffer();
     }
@@ -2722,4 +3753,106 @@ void SPINNING_THREAD(UNUSED void *arg) {
            buffer is produced, so the KOS stream is no longer pushed/used. */
         create_next_audio_buffer(audio_buffer, SAMPLES_HIGH);
     }
+}
+
+/* MK64_CROSSPLAY_COMPONENT_DIAG_R15_MAIN
+ * Cross-platform, read-only diagnostic snapshot.
+ * Hashes integers in an explicit byte order so PPC/x86 host endianness
+ * cannot itself create a mismatch.
+ */
+static u32 mkdiag_fnv_u32(u32 h, u32 v) {
+    h = (h ^ ((v >> 24) & 0xFFU)) * 16777619U;
+    h = (h ^ ((v >> 16) & 0xFFU)) * 16777619U;
+    h = (h ^ ((v >>  8) & 0xFFU)) * 16777619U;
+    h = (h ^ ( v        & 0xFFU)) * 16777619U;
+    return h;
+}
+static u32 mkdiag_float_bits(f32 v) {
+    union { f32 f; u32 u; } x;
+    x.f = v;
+    return x.u;
+}
+static u32 mkdiag_hash_vec3_raw(const f32 *v) {
+    u32 h = 2166136261U;
+    h = mkdiag_fnv_u32(h, mkdiag_float_bits(v[0]));
+    h = mkdiag_fnv_u32(h, mkdiag_float_bits(v[1]));
+    h = mkdiag_fnv_u32(h, mkdiag_float_bits(v[2]));
+    return h;
+}
+static u32 mkdiag_quant_float_bits(f32 v) {
+    u32 b = mkdiag_float_bits(v);
+    /* Diagnostic only: discard the lowest 12 mantissa/storage bits.
+     * This never changes gameplay state. */
+    return b & 0xFFFFF000U;
+}
+static u32 mkdiag_hash_vec3_quant(const f32 *v) {
+    u32 h = 2166136261U;
+    h = mkdiag_fnv_u32(h, mkdiag_quant_float_bits(v[0]));
+    h = mkdiag_fnv_u32(h, mkdiag_quant_float_bits(v[1]));
+    h = mkdiag_fnv_u32(h, mkdiag_quant_float_bits(v[2]));
+    return h;
+}
+static u32 mkdiag_player_meta_hash(int i) {
+    u32 h = 2166136261U;
+    h = mkdiag_fnv_u32(h, (u32)gPlayers[i].type);
+    h = mkdiag_fnv_u32(h, (u32)(s32)gPlayers[i].lapCount);
+    h = mkdiag_fnv_u32(h, (u32)gPlayers[i].effects);
+    return h;
+}
+
+void mk64_crossplay_component_diag(unsigned int *out, int cap) {
+    extern u16 gRandomSeed16;
+    u32 core, full;
+    int i;
+    if (!out || cap < 36) return;
+    for (i = 0; i < cap; ++i) out[i] = 0;
+
+    out[0] = 0x4D4B4431U; /* MKD1 */
+    out[1] = (u32)gGlobalTimer;
+    out[2] = (u32)gGamestate;
+    out[3] = (u32)gModeSelection;
+    out[4] = (u32)gRandomSeed16;
+
+    core = 2166136261U;
+    core = mkdiag_fnv_u32(core, out[2]);
+    core = mkdiag_fnv_u32(core, out[3]);
+    core = mkdiag_fnv_u32(core, out[4]);
+    out[5] = core;
+
+    out[6]  = mkdiag_player_meta_hash(0);
+    out[7]  = mkdiag_hash_vec3_raw(gPlayers[0].pos);
+    out[8]  = mkdiag_hash_vec3_raw(gPlayers[0].velocity);
+    out[9]  = mkdiag_hash_vec3_quant(gPlayers[0].pos);
+    out[10] = mkdiag_hash_vec3_quant(gPlayers[0].velocity);
+
+    out[11] = mkdiag_player_meta_hash(1);
+    out[12] = mkdiag_hash_vec3_raw(gPlayers[1].pos);
+    out[13] = mkdiag_hash_vec3_raw(gPlayers[1].velocity);
+    out[14] = mkdiag_hash_vec3_quant(gPlayers[1].pos);
+    out[15] = mkdiag_hash_vec3_quant(gPlayers[1].velocity);
+
+    out[16] = mkdiag_float_bits(gPlayers[0].pos[0]);
+    out[17] = mkdiag_float_bits(gPlayers[0].pos[1]);
+    out[18] = mkdiag_float_bits(gPlayers[0].pos[2]);
+    out[19] = mkdiag_float_bits(gPlayers[0].velocity[0]);
+    out[20] = mkdiag_float_bits(gPlayers[0].velocity[1]);
+    out[21] = mkdiag_float_bits(gPlayers[0].velocity[2]);
+
+    out[22] = mkdiag_float_bits(gPlayers[1].pos[0]);
+    out[23] = mkdiag_float_bits(gPlayers[1].pos[1]);
+    out[24] = mkdiag_float_bits(gPlayers[1].pos[2]);
+    out[25] = mkdiag_float_bits(gPlayers[1].velocity[0]);
+    out[26] = mkdiag_float_bits(gPlayers[1].velocity[1]);
+    out[27] = mkdiag_float_bits(gPlayers[1].velocity[2]);
+
+    full = core;
+    for (i = 6; i <= 15; ++i) full = mkdiag_fnv_u32(full, out[i]);
+    out[28] = full;
+
+    out[30] = (u32)gPlayers[0].type;
+    out[31] = (u32)(s32)gPlayers[0].lapCount;
+    out[32] = (u32)gPlayers[0].effects;
+    out[33] = (u32)gPlayers[1].type;
+    out[34] = (u32)(s32)gPlayers[1].lapCount;
+    out[35] = (u32)gPlayers[1].effects;
 }

@@ -20,6 +20,12 @@
 #include "cpu_vehicles_camera_path.h"
 #include "menu_items.h"
 
+/* MK64 R33 OG local-listener audio.  These are read-only presentation helpers;
+ * they do not alter synchronized game state. */
+extern int xbox_netplay_active(void);
+extern int xbox_netplay_local_slot(void);
+extern int xbox_netplay_local_count(void);
+
 #define PLAYER_SOUND_DEBUGGING 1
 
 s32 AosSendMesg( OSMesgQueue *mq,  OSMesg msg,  s32 flag);
@@ -244,7 +250,8 @@ s8 func_800C16E8(f32 arg0, f32 arg1, u8 cameraId) {
     f32 var_f2 = 0.0f;
     new_var2 = &var_f0;
 
-    if (D_800EA1C0 == 0) {
+    if (D_800EA1C0 == 0 ||
+        (xbox_netplay_active() && gGamestate == RACING)) {
         if (D_800EA0F4 != 0) {
             var_f2 = 10.0f;
             var_f14 = 20.0f;
@@ -1246,6 +1253,42 @@ void func_800C40F0(u8 arg0) {
 void play_sound(u32 soundBits, Vec3f* position, u8 cameraId, f32* arg3, f32* arg4, s8* arg5) {
     u8 bank;
     struct Sound* temp_v0;
+
+    /* MK64 R38 OG source-owned positional audio filter.
+     *
+     * Do NOT decide ownership from cameraId. Global/UI sounds deliberately use
+     * camera IDs such as 0 and 4; play_sound2() uses D_800EA1C8 + cameraId 4 for
+     * countdown, pause/menu cursor sounds, selection sounds, etc.
+     *
+     * Filter only sounds whose POSITION pointer identifies a specific racer.
+     * This mirrors the newer Xbox 360 audio rule:
+     *   - local racer emitters: keep and remap to local listener index
+     *   - remote racer emitters: suppress
+     *   - global/UI/world emitters: always keep
+     */
+    if (xbox_netplay_active() && gGamestate == RACING) {
+        int first = xbox_netplay_local_slot();
+        int count = xbox_netplay_local_count();
+        int source;
+
+        if (first >= 0 && first < 8 && count > 0 && (first + count) <= 8) {
+            for (source = 0; source < 8; ++source) {
+                if (position == &D_800E9F7C[source].pos) {
+                    if (source < first || source >= (first + count)) {
+                        return;
+                    }
+                    cameraId = (u8)(source - first);
+                    break;
+                }
+            }
+
+            /* Non-racer sources are global/UI/world sounds. Keep them audible
+             * and normalize out-of-range/global camera IDs to listener 0. */
+            if (source == 8 && cameraId >= (u8)count) {
+                cameraId = 0;
+            }
+        }
+    }
 
     bank = soundBits >> 0x1C;
 

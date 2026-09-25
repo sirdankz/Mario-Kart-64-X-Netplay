@@ -1,3 +1,4 @@
+#include "canonical_gameplay.h"
 #include <ultra64.h>
 #include <sincoss.h>
 #include <mk64.h>
@@ -519,7 +520,10 @@ void func_802B64C4(Vec3f arg0, s16 arg1) {
 }
 
 void calculate_orientation_matrix(Mat3 dest, f32 arg1, f32 arg2, f32 arg3, s16 rotationAngle) {
-#if 0
+/* R20: the SH4 shim converts the u16 heading to rounded radians and
+     * back, losing angle units before building the kart's physics matrix.
+     * Use the original scalar/table path, as on Xbox 360. */
+#if defined(TARGET_XBOX)
     Mat3 mtx_rot_y;
     Mat3 matrix;
     s32 i, j;
@@ -788,7 +792,7 @@ u16 atan2_lookup(f32 y, f32 x) {
                 ret = 0xC000;
             }
         } else {
-            ret = gArctanTable[(s32) (y / x * 1024 + 0.5f)];
+            ret = gArctanTable[mk64_canonical_atan_index(y, x)];
         }
     }
     return ret;
@@ -852,7 +856,18 @@ f32 calculate_vector_angle_xy(f32 vectorX) {
     return mk64_atan2f(sqrtf(1.0 - (vectorX * vectorX)), vectorX);
 }
 
+
+/* MK64_ASTRA_TRACE_R17: RAM-only rolling RNG transition trace. */
+#if defined(TARGET_XBOX)
+#define ASTRA_RNG_HISTORY 8192U
+typedef struct {u32 seq,frame,timer;u16 before,after,gs,pad;} AstraRngR17;static AstraRngR17 sAstraRngR17[ASTRA_RNG_HISTORY];static u32 sAstraRngSeqR17=0;
+extern int xbox_netplay_active(void);extern unsigned int xbox_netplay_frame(void);extern void xbox_netplay_trace(const char *fmt,...);
+static void mk64_astra_rng_note(u16 before,u16 after){extern int xbox_netplay_diagnostics_enabled(void);AstraRngR17 *r;if(!xbox_netplay_active()||!xbox_netplay_diagnostics_enabled())return;r=&sAstraRngR17[sAstraRngSeqR17&(ASTRA_RNG_HISTORY-1U)];r->seq=sAstraRngSeqR17++;r->frame=xbox_netplay_frame();r->timer=(u32)gGlobalTimer;r->before=before;r->after=after;r->gs=(u16)gGamestate;r->pad=0;}
+unsigned int mk64_astra_rng_call_count(void){return sAstraRngSeqR17;}
+void mk64_astra_rng_dump(void){u32 end=sAstraRngSeqR17,start=end>256U?end-256U:0,i;xbox_netplay_trace("ASTRA_RNG_BEGIN SIDE=OG FIRST=%lu LAST=%lu\n",(unsigned long)start,(unsigned long)end);for(i=start;i<end;i++){AstraRngR17 *r=&sAstraRngR17[i&(ASTRA_RNG_HISTORY-1U)];if(r->seq!=i)continue;xbox_netplay_trace("ASTRA_RNG SIDE=OG N=%lu F=%lu GT=%lu GS=%u B=%04X A=%04X\n",(unsigned long)r->seq,(unsigned long)r->frame,(unsigned long)r->timer,(unsigned)r->gs,r->before,r->after);}xbox_netplay_trace("ASTRA_RNG_END SIDE=OG\n");}
+#endif
 u16 random_u16(void) {
+    u16 astra_r17_before = gRandomSeed16;
     u16 temp1, temp2;
 
     if (gRandomSeed16 == 22026) {
@@ -877,6 +892,9 @@ u16 random_u16(void) {
         gRandomSeed16 = temp2 ^ 0x8180;
     }
 
+#if defined(TARGET_XBOX)
+    mk64_astra_rng_note(astra_r17_before, gRandomSeed16);
+#endif
     return gRandomSeed16;
 }
 
@@ -902,8 +920,11 @@ void func_802B7F7C(Vec3f arg0, Vec3f arg1, Vec3s dest) {
     dest[2] = func_802B7F34(x1, y1, x2, y2);
 }
 
+/* R20: match the Xbox 360/N64 angle lookup exactly. Converting with the
+ * old truncated TRIG_ARG_SCALE makes sin(0x8000) nonzero, pushing a kart
+ * sideways even while driving straight. Library trig also varies by platform. */
 f32 sins(u16 arg0) {
-#if 0
+#if defined(TARGET_XBOX)
     return gSineTable[arg0 >> 4];
 #else
     float farg0 = (float)(arg0 & 0xfff0) * TRIG_ARG_SCALE;
@@ -912,7 +933,7 @@ f32 sins(u16 arg0) {
 }
 
 f32 coss(u16 arg0) {
-#if 0
+#if defined(TARGET_XBOX)
     return gCosineTable[arg0 >> 4];
 #else
     float farg0 = (float)(arg0 & 0xfff0) * TRIG_ARG_SCALE;

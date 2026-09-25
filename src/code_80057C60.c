@@ -39,6 +39,13 @@
 #include "data/some_data.h"
 
 //! @warning this macro is undef'd at the end of this file
+#if defined(TARGET_XBOX)
+/* R41 presentation-only online HUD selection. */
+extern int xbox_netplay_active(void);
+extern int xbox_netplay_local_count(void);
+extern int xbox_netplay_local_slot(void);
+#endif
+
 #define MAKE_RGB(r, g, b) (((r) << 0x10) | ((g) << 0x08) | (b << 0x00))
 
 s32 D_80165590;
@@ -884,7 +891,26 @@ void func_80058C20(u32 arg0) {
     }
 }
 
+static int r41_og_local_hud_slot(void) {
+#if defined(TARGET_XBOX)
+    int slot;
+    if (!xbox_netplay_active() || xbox_netplay_local_count() != 1) return -1;
+    slot = xbox_netplay_local_slot();
+    if (slot < 0 || slot >= 4) return -1;
+    return slot;
+#else
+    return -1;
+#endif
+}
+
 void render_hud(u32 arg0) {
+#if defined(TARGET_XBOX)
+    /* MK64 R41: suppress the native split HUD for the one-local-player
+     * fullscreen online presentation. A native-proportion 1P HUD is emitted
+     * once at frame end instead. */
+    if (r41_og_local_hud_slot() >= 0) return;
+#endif
+
     D_8018D21C = arg0;
     gSPDisplayList(gDisplayListHead++, &D_0D0076F8);
     if (D_8018D22C == 0) {
@@ -1066,6 +1092,102 @@ void func_800591B4(void) {
         func_80057DD0();
         func_80057CE4();
     }
+}
+
+
+/* MK64 R41 OG fullscreen HUD + private logging
+ *
+ * R33 expands a horizontal 640x240 local pane to 640x480. That is correct for
+ * the world view after R34/R37 provide a 1P projection/camera, but it also
+ * doubles the vertical size of the stock split HUD. Draw the local player's HUD
+ * once with native settled 1P coordinates instead.
+ *
+ * The 319x239 scissor is an intentional one-pixel logical sentinel. The NV2A
+ * backend recognizes its 638x478 physical form and exempts only these HUD
+ * batches from the R33 split-pane crop/scale.
+ */
+static void r41_og_layout_hud_1p(hud_player *hud) {
+    hud->itemBoxX = 160;
+    hud->itemBoxY = 32;
+    hud->slideItemBoxX = 0;
+    hud->slideItemBoxY = 0;
+
+    hud->rankX = 0x2E;
+    hud->rankY = 0xC8;
+    hud->slideRankX = 0;
+    hud->slideRankY = 0;
+    hud->rankScaling = 0.45f;
+
+    hud->timerX = 0xE4;
+    hud->timerY = 0x11;
+    hud->lapCompletionTimeXs[0] = 0xE4;
+    hud->lapCompletionTimeXs[1] = 0xE4;
+    hud->lapCompletionTimeXs[2] = 0xE4;
+    hud->totalTimeX = 0xE4;
+
+    hud->lapX = 0x53;
+    hud->lapAfterImage1X = 0x53;
+    hud->lapAfterImage2X = 0x53;
+    hud->lapY = 0x19;
+}
+
+int xbox_render_online_local_hud(void) {
+#if defined(TARGET_XBOX)
+    int slot = r41_og_local_hud_slot();
+    hud_player savedHud;
+    s32 savedMode;
+
+    if (slot < 0 || gGamestate != RACING) return 0;
+    if (gHUDDisable != 0 || gIsHUDVisible == 0) return 1;
+
+    savedHud = playerHUD[slot];
+    savedMode = gModeSelection;
+    r41_og_layout_hud_1p(&playerHUD[slot]);
+
+    func_80057C60();
+
+    gDPSetScissor(gDisplayListHead++, G_SC_NON_INTERLACE,
+                  0, 0, SCREEN_WIDTH - 1, SCREEN_HEIGHT - 1);
+    gSPDisplayList(gDisplayListHead++, &D_0D0076F8);
+
+    if (D_801657D8 == 0) {
+        draw_item_window(slot);
+
+        if (savedMode != BATTLE && D_801657E4 != 2) {
+            if (savedMode == VERSUS) gModeSelection = GRAND_PRIX;
+            render_hud_timer(slot);
+            gModeSelection = savedMode;
+            draw_simplified_lap_count(slot);
+        }
+
+        if (savedMode != BATTLE && D_8018D2A4 != 0 &&
+            savedMode != TIME_TRIALS &&
+            gCurrentCourseId != COURSE_YOSHI_VALLEY) {
+            func_8004E800(slot);
+        }
+
+        if (savedMode != BATTLE && D_801657E8 != 0 &&
+            slot < 2 && D_80165800[slot] != 0) {
+            func_8004EE54(0);
+            render_mini_map_finish_line(0);
+            func_8004F3E4(0);
+        }
+    }
+
+    if (D_801657E4 != 2 && savedMode == GRAND_PRIX &&
+        D_8018D2BC != 0) {
+        func_80050320();
+    }
+
+    playerHUD[slot] = savedHud;
+    gModeSelection = savedMode;
+
+    gDPSetScissor(gDisplayListHead++, G_SC_NON_INTERLACE,
+                  0, 0, SCREEN_WIDTH, SCREEN_HEIGHT);
+    return 1;
+#else
+    return 0;
+#endif
 }
 
 void func_80059358(void) {

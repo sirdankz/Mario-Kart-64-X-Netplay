@@ -55,6 +55,14 @@
  * C linkage. */
 extern "C" {
 
+/* MK64 R33 OG per-console fullscreen view.  Presentation only. */
+extern int gGamestate;
+extern int gActiveScreenMode;
+extern int gPlayerCountSelection1;
+int xbox_netplay_active(void);
+int xbox_netplay_local_slot(void);
+int xbox_netplay_local_count(void);
+
 /* ------------------------------------------------------------------ config */
 
 #define XB_SCR_WIDTH   640
@@ -242,6 +250,86 @@ static D3DCOLOR sFogColor   = 0;
  * sets a viewport is not clipped away. */
 static uint16_t sVpX = 0, sVpY = 0, sVpW = XB_SCR_WIDTH, sVpH = XB_SCR_HEIGHT;
 static uint16_t sScX = 0, sScY = 0, sScW = XB_SCR_WIDTH, sScH = XB_SCR_HEIGHT;
+
+
+/* MK64 R33 OG per-console fullscreen view.
+ * The renderer already receives pre-transformed 640x480 screen coordinates.
+ * During an online split-screen race with exactly one local player, crop that
+ * player's pane and remap it to the whole 640x480 Xbox output.  This touches
+ * only deferred render vertices/scissors after simulation has finished. */
+typedef struct XbLocalViewRect {
+    int x, y, w, h;
+} XbLocalViewRect;
+
+static int xb_local_view_crop(XbLocalViewRect *r) {
+    int players, slot, mode;
+    if (!r || !xbox_netplay_active() || gGamestate != 4 || xbox_netplay_local_count() != 1)
+        return 0;
+    players = gPlayerCountSelection1;
+    slot = xbox_netplay_local_slot();
+    mode = gActiveScreenMode;
+    if (players < 2 || players > 4 || slot < 0 || slot >= players)
+        return 0;
+
+    r->x = 0; r->y = 0; r->w = XB_SCR_WIDTH; r->h = XB_SCR_HEIGHT;
+    if (mode == 1 && players == 2) {             /* horizontal 2P */
+        r->h = XB_SCR_HEIGHT / 2;
+        r->y = slot * r->h;
+    } else if (mode == 2 && players == 2) {      /* vertical 2P */
+        r->w = XB_SCR_WIDTH / 2;
+        r->x = slot * r->w;
+    } else if (mode == 3) {                      /* 3P/4P quadrants */
+        r->w = XB_SCR_WIDTH / 2;
+        r->h = XB_SCR_HEIGHT / 2;
+        r->x = (slot & 1) * r->w;
+        r->y = (slot >> 1) * r->h;
+    } else {
+        return 0;
+    }
+    return 1;
+}
+
+static int xb_local_view_intersect(const XbState *st, const XbLocalViewRect *crop,
+                                   XbLocalViewRect *out) {
+    int ax1 = st->sc_x, ay1 = st->sc_y;
+    int ax2 = ax1 + st->sc_w, ay2 = ay1 + st->sc_h;
+    int bx1 = crop->x, by1 = crop->y;
+    int bx2 = bx1 + crop->w, by2 = by1 + crop->h;
+    int x1 = ax1 > bx1 ? ax1 : bx1;
+    int y1 = ay1 > by1 ? ay1 : by1;
+    int x2 = ax2 < bx2 ? ax2 : bx2;
+    int y2 = ay2 < by2 ? ay2 : by2;
+    if (x2 <= x1 || y2 <= y1) return 0;
+    out->x = x1; out->y = y1; out->w = x2 - x1; out->h = y2 - y1;
+    return 1;
+}
+
+static void xb_local_view_scissor(XbState *st, const XbLocalViewRect *crop,
+                                  const XbLocalViewRect *vis) {
+    int x1 = (vis->x - crop->x) * XB_SCR_WIDTH / crop->w;
+    int y1 = (vis->y - crop->y) * XB_SCR_HEIGHT / crop->h;
+    int x2 = ((vis->x + vis->w - crop->x) * XB_SCR_WIDTH + crop->w - 1) / crop->w;
+    int y2 = ((vis->y + vis->h - crop->y) * XB_SCR_HEIGHT + crop->h - 1) / crop->h;
+    if (x1 < 0) x1 = 0; if (y1 < 0) y1 = 0;
+    if (x2 > XB_SCR_WIDTH) x2 = XB_SCR_WIDTH;
+    if (y2 > XB_SCR_HEIGHT) y2 = XB_SCR_HEIGHT;
+    if (x2 <= x1) x2 = x1 + 1;
+    if (y2 <= y1) y2 = y1 + 1;
+    st->sc_x = (uint16_t)x1; st->sc_y = (uint16_t)y1;
+    st->sc_w = (uint16_t)(x2 - x1); st->sc_h = (uint16_t)(y2 - y1);
+}
+
+static void xb_local_view_vertices(XbBucket *b, const XbBatch *bb,
+                                   const XbLocalViewRect *crop) {
+    const float sx = (float)XB_SCR_WIDTH / (float)crop->w;
+    const float sy = (float)XB_SCR_HEIGHT / (float)crop->h;
+    uint32_t i;
+    for (i = 0; i < bb->count; ++i) {
+        dc_fast_t *v = &b->verts[bb->start + i];
+        v->vert.x = (v->vert.x - (float)crop->x) * sx;
+        v->vert.y = (v->vert.y - (float)crop->y) * sy;
+    }
+}
 
 /* Exported so the front-end's inline OP path can test it without a call. */
 uint8_t gfx_pvr_op_dirty = 1;
@@ -779,9 +867,34 @@ static void xb_flush_bucket(XbBucket *b, int kind, int backdrops) {
 #endif
             continue;
         }
-        xb_apply_state(&bb->st, kind, 0);
-        sDev->DrawVerticesUP(D3DPT_TRIANGLELIST, bb->count,
-                             &b->verts[bb->start], sizeof(dc_fast_t));
+        {
+            XbState drawState = bb->st;
+            XbLocalViewRect crop, visible;
+
+            /* MK64 R41 HUD sentinel.
+             * The native HUD emits logical 319x239, which reaches this
+             * 640x480 backend as exactly 638x478. Those batches are already
+             * native 1P HUD coordinates, so skip only R33's pane transform. */
+            const int r41Hud =
+                drawState.sc_x == 0 && drawState.sc_y == 0 &&
+                drawState.sc_w == XB_SCR_WIDTH - 2 &&
+                drawState.sc_h == XB_SCR_HEIGHT - 2;
+
+            if (r41Hud) {
+                drawState.sc_x = 0;
+                drawState.sc_y = 0;
+                drawState.sc_w = XB_SCR_WIDTH;
+                drawState.sc_h = XB_SCR_HEIGHT;
+            } else if (xb_local_view_crop(&crop)) {
+                if (!xb_local_view_intersect(&drawState, &crop, &visible))
+                    continue;
+                xb_local_view_vertices(b, bb, &crop);
+                xb_local_view_scissor(&drawState, &crop, &visible);
+            }
+            xb_apply_state(&drawState, kind, 0);
+            sDev->DrawVerticesUP(D3DPT_TRIANGLELIST, bb->count,
+                                 &b->verts[bb->start], sizeof(dc_fast_t));
+        }
     }
 }
 

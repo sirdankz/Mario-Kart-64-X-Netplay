@@ -1,3 +1,4 @@
+#include "canonical_gameplay.h"
 /* This decomp treats uintptr_t as a pointer type throughout, for N64 segmented
  * addressing. gcc (the Dreamcast toolchain) warns about the resulting implicit
  * conversions; clang 15+ makes them errors. RXDK's C build does not accept
@@ -44,6 +45,9 @@
 #include "data/other_textures.h"
 #include "data/some_data.h"
 #include "racing/memory.h"
+#ifdef TARGET_XBOX
+#include "xbox_netplay.h"
+#endif
 
 //! @todo unused?
 f32 D_800E43B0[] = { 65536.0, 0.0, 1.0, 0.0, 0.0, 65536.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
@@ -457,6 +461,11 @@ void set_type_object(s32 objectIndex, s32 arg1) {
 void func_800729EC(s32 objectIndex) {
     u32 temp_v1 = 1;
     s32 i;
+
+    /* Crossplay already commits the input frame before simulation. Run GO at
+     * the same countdown callback as Xbox 360. The host snapshot describes
+     * the START of this frame: waiting for it to say state 3 delays the OG
+     * callback until the following frame and loses one 60 Hz physics tick. */
 
     start_race();
     object_next_state(objectIndex);

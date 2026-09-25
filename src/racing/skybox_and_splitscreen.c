@@ -18,6 +18,301 @@
 #include "math_util.h"
 #include "main.h"
 #include "menus.h"
+#include <stdio.h>
+
+
+/* MK64 R34 OG local 1P projection.
+ *
+ * R33 expands the local multiplayer pane to the full 640x480 Xbox output.
+ * MK64 normally renders a 2P vertical pane with aspect 2/3 and a 2P
+ * horizontal pane with aspect 8/3.  Expanding those rasterized panes without
+ * changing the projection makes the picture look wide/tall.
+ *
+ * Do NOT change gScreenAspect, gActiveScreenMode, camera state, or gameplay.
+ * R28 proved camera-side state can affect deterministic simulation.  Instead,
+ * substitute the normal 1-player 4:3 aspect only at the render-projection
+ * calls.  The synchronized camera pose/FOV remains untouched; only projection
+ * into the local presentation surface changes. */
+extern int xbox_netplay_active(void);
+extern int xbox_netplay_local_count(void);
+extern int xbox_netplay_local_slot(void);
+
+static f32 xbox_local_render_aspect(f32 normalAspect) {
+    if (xbox_netplay_active() && gGamestate == RACING &&
+        xbox_netplay_local_count() == 1 && gPlayerCountSelection1 > 1) {
+        return 1.33333334f; /* exact normal MK64 1P aspect */
+    }
+    return normalAspect;
+}
+
+/* MK64 R37 render-only 1P camera framing.
+ *
+ * R36.1 hardware logs proved the remaining fullscreen mismatch is NOT the
+ * projection matrix.  Offline 1P uses a ~120.375-unit eye->target distance:
+ *      eye offset:    50 behind, 9.5 high
+ *      target offset: 70 ahead
+ * Horizontal 2P uses only ~65.705 units:
+ *      eye offset:    35 behind, 9.6 high
+ *      target offset: 30 ahead
+ * 3P/4P uses 40 behind / 18 ahead / 9.0 high.
+ *
+ * Do not touch cameras[] itself.  R28 proved camera state can feed back into
+ * deterministic simulation.  This helper remaps only the eye/target values
+ * passed to the render look-at matrix for the one local online view.
+ */
+static int r37_local_render_camera(s32 camId) {
+    return (xbox_netplay_active() &&
+            gGamestate == RACING &&
+            xbox_netplay_local_count() == 1 &&
+            gPlayerCountSelection1 > 1 &&
+            camId == xbox_netplay_local_slot() &&
+            gModeSelection != BATTLE);
+}
+
+static void r37_render_eye_at(s32 camId,
+                              const f32 eye[3], const f32 at[3],
+                              f32 outEye[3], f32 outAt[3]) {
+    f32 behind, ahead, eyeY;
+    f32 t;
+    f32 anchorX, anchorZ;
+
+    outEye[0] = eye[0];
+    outEye[1] = eye[1];
+    outEye[2] = eye[2];
+    outAt[0] = at[0];
+    outAt[1] = at[1];
+    outAt[2] = at[2];
+
+    if (!r37_local_render_camera(camId)) {
+        return;
+    }
+
+    switch (gActiveScreenMode) {
+        case SCREEN_MODE_2P_SPLITSCREEN_HORIZONTAL:
+            behind = 35.0f;
+            ahead = 30.0f;
+            eyeY = 9.6f;
+            break;
+        case SCREEN_MODE_3P_4P_SPLITSCREEN:
+            behind = 40.0f;
+            ahead = 18.0f;
+            eyeY = 9.0f;
+            break;
+        case SCREEN_MODE_2P_SPLITSCREEN_VERTICAL:
+            return;
+        default:
+            return;
+    }
+
+    t = behind / (behind + ahead);
+    anchorX = eye[0] + ((at[0] - eye[0]) * t);
+    anchorZ = eye[2] + ((at[2] - eye[2]) * t);
+
+    outEye[0] = anchorX + ((eye[0] - anchorX) * (50.0f / behind));
+    outEye[2] = anchorZ + ((eye[2] - anchorZ) * (50.0f / behind));
+    outAt[0] = anchorX + ((at[0] - anchorX) * (70.0f / ahead));
+    outAt[2] = anchorZ + ((at[2] - anchorZ) * (70.0f / ahead));
+
+    outAt[1] = at[1];
+    outEye[1] = at[1] + ((eye[1] - at[1]) * (9.5f / eyeY));
+}
+
+static void r37_guLookAt(Mtx *mtx,
+                         f32 xEye, f32 yEye, f32 zEye,
+                         f32 xAt, f32 yAt, f32 zAt,
+                         f32 xUp, f32 yUp, f32 zUp) {
+    Vec3f eye;
+    Vec3f at;
+    Vec3f renderEye;
+    Vec3f renderAt;
+    s32 camId = -1;
+    s32 i;
+
+    eye[0] = xEye; eye[1] = yEye; eye[2] = zEye;
+    at[0] = xAt; at[1] = yAt; at[2] = zAt;
+
+    if (gGfxPool) {
+        for (i = 0; i < 4; ++i) {
+            if (mtx == &gGfxPool->mtxLookAt[i]) {
+                camId = i;
+                break;
+            }
+        }
+    }
+
+    r37_render_eye_at(camId, eye, at, renderEye, renderAt);
+    guLookAt(mtx,
+             renderEye[0], renderEye[1], renderEye[2],
+             renderAt[0], renderAt[1], renderAt[2],
+             xUp, yUp, zUp);
+}
+
+
+/* MK64 R36 OG offline-vs-online view reference logger.
+ *
+ * Diagnostic only: observe the exact OFFLINE 1P and ONLINE local-fullscreen
+ * projection/camera values without changing any gameplay or render state.
+ *
+ * Output:
+ *   D:\mk64-view-offline.log
+ *   D:\mk64-view-online.log
+ * with T: fallback if D: cannot be opened.
+ */
+extern int xbox_netplay_diagnostics_enabled(void);
+static u32 r36_f32_bits(f32 v) {
+    union { f32 f; u32 u; } x;
+    x.f = v;
+    return x.u;
+}
+
+static FILE *r36_view_file(int online) {
+    static FILE *off = NULL;
+    static FILE *on = NULL;
+    static int offTried = 0;
+    static int onTried = 0;
+    FILE **slot = online ? &on : &off;
+    int *tried = online ? &onTried : &offTried;
+    const char *dpath = online ? "D:\\mk64-view-online.log"
+                               : "D:\\mk64-view-offline.log";
+    const char *tpath = online ? "T:\\mk64-view-online.log"
+                               : "T:\\mk64-view-offline.log";
+
+    if (*slot) return *slot;
+    if (*tried) return NULL;
+    *tried = 1;
+
+    *slot = fopen(dpath, "w");
+    if (!*slot) *slot = fopen(tpath, "w");
+    if (*slot) {
+        fprintf(*slot,
+                "R36_VIEW_HEADER mode=%s build=R36-OG-VIEW-REFERENCE sampleEvery=30 maxSamples=90\n",
+                online ? "ONLINE" : "OFFLINE");
+        fflush(*slot);
+    }
+    return *slot;
+}
+
+static void r36_crop_info(int online, int mode, int slot,
+                          int *cropX, int *cropY, int *cropW, int *cropH,
+                          int *scaleX1000, int *scaleY1000) {
+    *cropX = 0; *cropY = 0; *cropW = 640; *cropH = 480;
+    *scaleX1000 = 1000; *scaleY1000 = 1000;
+    if (!online || gPlayerCountSelection1 <= 1) return;
+
+    if (mode == SCREEN_MODE_2P_SPLITSCREEN_HORIZONTAL) {
+        *cropW = 640; *cropH = 240;
+        *cropY = slot * 240;
+    } else if (mode == SCREEN_MODE_2P_SPLITSCREEN_VERTICAL) {
+        *cropW = 320; *cropH = 480;
+        *cropX = slot * 320;
+    } else if (mode == SCREEN_MODE_3P_4P_SPLITSCREEN) {
+        *cropW = 320; *cropH = 240;
+        *cropX = (slot & 1) * 320;
+        *cropY = (slot >> 1) * 240;
+    }
+
+    if (*cropW > 0) *scaleX1000 = 640000 / *cropW;
+    if (*cropH > 0) *scaleY1000 = 480000 / *cropH;
+}
+
+static void r36_log_projection(Mtx *mtx, f32 fovy, f32 aspect,
+                               f32 nearp, f32 farp, f32 scale) {
+    if (!xbox_netplay_diagnostics_enabled()) return;
+    static u32 offlineCalls = 0, onlineCalls = 0;
+    static u32 offlineSamples = 0, onlineSamples = 0;
+    int online = xbox_netplay_active() ? 1 : 0;
+    u32 *calls = online ? &onlineCalls : &offlineCalls;
+    u32 *samples = online ? &onlineSamples : &offlineSamples;
+    int camId;
+    int localSlot;
+    int cropX, cropY, cropW, cropH, sx1000, sy1000;
+    struct UnkStruct_800DC5EC *view;
+    Camera *cam;
+    FILE *f;
+    const u32 *mw;
+    int i;
+
+    if (gGamestate != RACING || !gGfxPool) return;
+
+    camId = (int)(mtx - &gGfxPool->mtxPersp[0]);
+    if (camId < 0 || camId > 3) return;
+
+    localSlot = online ? xbox_netplay_local_slot() : 0;
+
+    if (online) {
+        if (xbox_netplay_local_count() != 1) return;
+        if (camId != localSlot) return;
+    } else {
+        if (gActiveScreenMode != SCREEN_MODE_1P ||
+            gPlayerCountSelection1 != 1 ||
+            camId != 0) {
+            return;
+        }
+    }
+
+    (*calls)++;
+    if (((*calls) - 1u) % 30u != 0u) return;
+    if (*samples >= 90u) return;
+    (*samples)++;
+
+    f = r36_view_file(online);
+    if (!f) return;
+
+    view = &D_8015F480[camId];
+    cam = &cameras[camId];
+
+    r36_crop_info(online, gActiveScreenMode, localSlot,
+                  &cropX, &cropY, &cropW, &cropH, &sx1000, &sy1000);
+
+    fprintf(f,
+        "VIEW n=%u mode=%s cam=%d local=%d activeMode=%d selectedMode=%d players=%d "
+        "zoom=%08X aspectGlobal=%08X aspectRender=%08X near=%08X far=%08X scale=%08X "
+        "camFov=%08X "
+        "pos=%08X,%08X,%08X look=%08X,%08X,%08X up=%08X,%08X,%08X "
+        "rot=%d,%d,%d "
+        "vpRaw=%d,%d,%d,%d "
+        "crop=%d,%d,%d,%d cropScale1000=%d,%d ",
+        (unsigned)*samples,
+        online ? "ONLINE" : "OFFLINE",
+        camId, localSlot,
+        (int)gActiveScreenMode, (int)gScreenModeSelection,
+        (int)gPlayerCountSelection1,
+        (unsigned)r36_f32_bits(fovy),
+        (unsigned)r36_f32_bits(gScreenAspect),
+        (unsigned)r36_f32_bits(aspect),
+        (unsigned)r36_f32_bits(nearp),
+        (unsigned)r36_f32_bits(farp),
+        (unsigned)r36_f32_bits(scale),
+        (unsigned)r36_f32_bits(cam->unk_B4),
+        (unsigned)r36_f32_bits(cam->pos[0]),
+        (unsigned)r36_f32_bits(cam->pos[1]),
+        (unsigned)r36_f32_bits(cam->pos[2]),
+        (unsigned)r36_f32_bits(cam->lookAt[0]),
+        (unsigned)r36_f32_bits(cam->lookAt[1]),
+        (unsigned)r36_f32_bits(cam->lookAt[2]),
+        (unsigned)r36_f32_bits(cam->up[0]),
+        (unsigned)r36_f32_bits(cam->up[1]),
+        (unsigned)r36_f32_bits(cam->up[2]),
+        (int)cam->rot[0], (int)cam->rot[1], (int)cam->rot[2],
+        (int)view->screenStartX, (int)view->screenStartY,
+        (int)view->screenWidth, (int)view->screenHeight,
+        cropX, cropY, cropW, cropH, sx1000, sy1000);
+
+    mw = (const u32 *)mtx;
+    fprintf(f, "mtx=");
+    for (i = 0; i < 16; ++i) {
+        fprintf(f, "%08X%s", (unsigned)mw[i], (i == 15) ? "" : ",");
+    }
+    fprintf(f, "\n");
+    fflush(f);
+}
+
+static void r36_guPerspective(Mtx *mtx, u16 *perspNorm, f32 fovy, f32 aspect,
+                              f32 nearp, f32 farp, f32 scale) {
+    guPerspective(mtx, perspNorm, fovy, aspect, nearp, farp, scale);
+    r36_log_projection(mtx, fovy, aspect, nearp, farp, scale);
+}
+
 
 Vp D_802B8880[] = {
     { { { 640, 480, 511, 0 }, { 640, 480, 511, 0 } } },
@@ -573,8 +868,13 @@ void func_802A4A0C(Vtx* vtx, struct UnkStruct_800DC5EC* arg1, UNUSED s32 arg2, U
     sp5C[0] = 0.0f;
     sp5C[1] = 0.0f;
     sp5C[2] = 30000.0f;
-    func_802B5564(matrix1, &sp128, camera->unk_B4, gScreenAspect, gCourseNearPersp, gCourseFarPersp, 1.0f);
-    func_802B5794(matrix2, camera->pos, camera->lookAt);
+    func_802B5564(matrix1, &sp128, camera->unk_B4, xbox_local_render_aspect(gScreenAspect), gCourseNearPersp, gCourseFarPersp, 1.0f);
+    {
+        Vec3f r37Eye;
+        Vec3f r37At;
+        r37_render_eye_at((s32)(camera - cameras), camera->pos, camera->lookAt, r37Eye, r37At);
+        func_802B5794(matrix2, r37Eye, r37At);
+    }
     mtxf_multiplication(matrix3, matrix1, matrix2);
 
     sp58 = ((matrix3[0][3] * sp5C[0]) + (matrix3[1][3] * sp5C[1]) + (matrix3[2][3] * sp5C[2])) + matrix3[3][3];
@@ -893,7 +1193,7 @@ void render_player_one_1p_screen(void) {
     Mat4 matrix;
 
 #ifdef VERSION_EU
-    sp9C = gScreenAspect * 1.2f;
+    sp9C = xbox_local_render_aspect(gScreenAspect) * 1.2f;
 #endif
     func_802A53A4();
     init_rdp();
@@ -901,16 +1201,16 @@ void render_player_one_1p_screen(void) {
     gSPSetGeometryMode(gDisplayListHead++, G_ZBUFFER | G_SHADE | G_CULL_BACK | G_LIGHTING | G_SHADING_SMOOTH);
     gDPSetRenderMode(gDisplayListHead++, G_RM_AA_ZB_OPA_SURF, G_RM_AA_ZB_OPA_SURF2);
 #ifdef VERSION_EU
-    guPerspective(&gGfxPool->mtxPersp[0], &perspNorm, gCameraZoom[0], sp9C, gCourseNearPersp, gCourseFarPersp, 1.0f);
+    r36_guPerspective(&gGfxPool->mtxPersp[0], &perspNorm, gCameraZoom[0], sp9C, gCourseNearPersp, gCourseFarPersp, 1.0f);
 #else
-    guPerspective(&gGfxPool->mtxPersp[0], &perspNorm, gCameraZoom[0], gScreenAspect, gCourseNearPersp, gCourseFarPersp,
+    r36_guPerspective(&gGfxPool->mtxPersp[0], &perspNorm, gCameraZoom[0], xbox_local_render_aspect(gScreenAspect), gCourseNearPersp, gCourseFarPersp,
                   1.0f);
 #endif
     //gSPPerspNormalize(gDisplayListHead++, perspNorm);
     gSPMatrix(gDisplayListHead++, VIRTUAL_TO_PHYSICAL(&gGfxPool->mtxPersp[0]),
               G_MTX_NOPUSH | G_MTX_LOAD | G_MTX_PROJECTION);
 
-    guLookAt(&gGfxPool->mtxLookAt[0], camera->pos[0], camera->pos[1], camera->pos[2], camera->lookAt[0],
+    r37_guLookAt(&gGfxPool->mtxLookAt[0], camera->pos[0], camera->pos[1], camera->pos[2], camera->lookAt[0],
              camera->lookAt[1], camera->lookAt[2], camera->up[0], camera->up[1], camera->up[2]);
     if (D_800DC5C8 == 0) {
         gSPMatrix(gDisplayListHead++, VIRTUAL_TO_PHYSICAL(&gGfxPool->mtxLookAt[0]),
@@ -958,21 +1258,21 @@ void render_player_one_2p_screen_vertical(void) {
 
     func_802A50EC();
 #ifdef VERSION_EU
-    sp9C = gScreenAspect * 1.2f;
+    sp9C = xbox_local_render_aspect(gScreenAspect) * 1.2f;
 #endif
     init_rdp();
     set_the_scissor(D_800DC5EC);
     gSPSetGeometryMode(gDisplayListHead++, G_ZBUFFER | G_SHADE | G_CULL_BACK | G_SHADING_SMOOTH);
 #ifdef VERSION_EU
-    guPerspective(&gGfxPool->mtxPersp[0], &perspNorm, gCameraZoom[0], sp9C, gCourseNearPersp, gCourseFarPersp, 1.0f);
+    r36_guPerspective(&gGfxPool->mtxPersp[0], &perspNorm, gCameraZoom[0], sp9C, gCourseNearPersp, gCourseFarPersp, 1.0f);
 #else
-    guPerspective(&gGfxPool->mtxPersp[0], &perspNorm, gCameraZoom[0], gScreenAspect, gCourseNearPersp, gCourseFarPersp,
+    r36_guPerspective(&gGfxPool->mtxPersp[0], &perspNorm, gCameraZoom[0], xbox_local_render_aspect(gScreenAspect), gCourseNearPersp, gCourseFarPersp,
                   1.0f);
 #endif
     //gSPPerspNormalize(gDisplayListHead++, perspNorm);
     gSPMatrix(gDisplayListHead++, VIRTUAL_TO_PHYSICAL(&gGfxPool->mtxPersp[0]),
               G_MTX_NOPUSH | G_MTX_LOAD | G_MTX_PROJECTION);
-    guLookAt(&gGfxPool->mtxLookAt[0], camera->pos[0], camera->pos[1], camera->pos[2], camera->lookAt[0],
+    r37_guLookAt(&gGfxPool->mtxLookAt[0], camera->pos[0], camera->pos[1], camera->pos[2], camera->lookAt[0],
              camera->lookAt[1], camera->lookAt[2], camera->up[0], camera->up[1], camera->up[2]);
 
     if (D_800DC5C8 == 0) {
@@ -1027,19 +1327,19 @@ void render_player_two_2p_screen_vertical(void) {
     init_rdp();
     set_the_scissor(D_800DC5F0);
 #ifdef VERSION_EU
-    sp9C = gScreenAspect * 1.2f;
+    sp9C = xbox_local_render_aspect(gScreenAspect) * 1.2f;
 #endif
     gSPSetGeometryMode(gDisplayListHead++, G_ZBUFFER | G_SHADE | G_CULL_BACK | G_SHADING_SMOOTH);
 #ifdef VERSION_EU
-    guPerspective(&gGfxPool->mtxPersp[1], &perspNorm, gCameraZoom[1], sp9C, gCourseNearPersp, gCourseFarPersp, 1.0f);
+    r36_guPerspective(&gGfxPool->mtxPersp[1], &perspNorm, gCameraZoom[1], sp9C, gCourseNearPersp, gCourseFarPersp, 1.0f);
 #else
-    guPerspective(&gGfxPool->mtxPersp[1], &perspNorm, gCameraZoom[1], gScreenAspect, gCourseNearPersp, gCourseFarPersp,
+    r36_guPerspective(&gGfxPool->mtxPersp[1], &perspNorm, gCameraZoom[1], xbox_local_render_aspect(gScreenAspect), gCourseNearPersp, gCourseFarPersp,
                   1.0f);
 #endif
     //gSPPerspNormalize(gDisplayListHead++, perspNorm);
     gSPMatrix(gDisplayListHead++, VIRTUAL_TO_PHYSICAL(&gGfxPool->mtxPersp[1]),
               G_MTX_NOPUSH | G_MTX_LOAD | G_MTX_PROJECTION);
-    guLookAt(&gGfxPool->mtxLookAt[1], camera->pos[0], camera->pos[1], camera->pos[2], camera->lookAt[0],
+    r37_guLookAt(&gGfxPool->mtxLookAt[1], camera->pos[0], camera->pos[1], camera->pos[2], camera->lookAt[0],
              camera->lookAt[1], camera->lookAt[2], camera->up[0], camera->up[1], camera->up[2]);
 
     if (D_800DC5C8 == 0) {
@@ -1090,19 +1390,19 @@ void render_player_one_2p_screen_horizontal(void) {
     init_rdp();
     set_the_scissor(D_800DC5EC);
 #ifdef VERSION_EU
-    sp9C = gScreenAspect * 1.2f;
+    sp9C = xbox_local_render_aspect(gScreenAspect) * 1.2f;
 #endif
     gSPSetGeometryMode(gDisplayListHead++, G_ZBUFFER | G_SHADE | G_CULL_BACK | G_SHADING_SMOOTH);
 #ifdef VERSION_EU
-    guPerspective(&gGfxPool->mtxPersp[0], &perspNorm, gCameraZoom[0], sp9C, gCourseNearPersp, gCourseFarPersp, 1.0f);
+    r36_guPerspective(&gGfxPool->mtxPersp[0], &perspNorm, gCameraZoom[0], sp9C, gCourseNearPersp, gCourseFarPersp, 1.0f);
 #else
-    guPerspective(&gGfxPool->mtxPersp[0], &perspNorm, gCameraZoom[0], gScreenAspect, gCourseNearPersp, gCourseFarPersp,
+    r36_guPerspective(&gGfxPool->mtxPersp[0], &perspNorm, gCameraZoom[0], xbox_local_render_aspect(gScreenAspect), gCourseNearPersp, gCourseFarPersp,
                   1.0f);
 #endif
     //gSPPerspNormalize(gDisplayListHead++, perspNorm);
     gSPMatrix(gDisplayListHead++, VIRTUAL_TO_PHYSICAL(&gGfxPool->mtxPersp[0]),
               G_MTX_NOPUSH | G_MTX_LOAD | G_MTX_PROJECTION);
-    guLookAt(&gGfxPool->mtxLookAt[0], camera->pos[0], camera->pos[1], camera->pos[2], camera->lookAt[0],
+    r37_guLookAt(&gGfxPool->mtxLookAt[0], camera->pos[0], camera->pos[1], camera->pos[2], camera->lookAt[0],
              camera->lookAt[1], camera->lookAt[2], camera->up[0], camera->up[1], camera->up[2]);
 
     if (D_800DC5C8 == 0) {
@@ -1154,19 +1454,19 @@ void render_player_two_2p_screen_horizontal(void) {
     init_rdp();
     set_the_scissor(D_800DC5F0);
 #ifdef VERSION_EU
-    sp9C = gScreenAspect * 1.2f;
+    sp9C = xbox_local_render_aspect(gScreenAspect) * 1.2f;
 #endif
     gSPSetGeometryMode(gDisplayListHead++, G_ZBUFFER | G_SHADE | G_CULL_BACK | G_SHADING_SMOOTH);
 #ifdef VERSION_EU
-    guPerspective(&gGfxPool->mtxPersp[1], &perspNorm, gCameraZoom[1], sp9C, gCourseNearPersp, gCourseFarPersp, 1.0f);
+    r36_guPerspective(&gGfxPool->mtxPersp[1], &perspNorm, gCameraZoom[1], sp9C, gCourseNearPersp, gCourseFarPersp, 1.0f);
 #else
-    guPerspective(&gGfxPool->mtxPersp[1], &perspNorm, gCameraZoom[1], gScreenAspect, gCourseNearPersp, gCourseFarPersp,
+    r36_guPerspective(&gGfxPool->mtxPersp[1], &perspNorm, gCameraZoom[1], xbox_local_render_aspect(gScreenAspect), gCourseNearPersp, gCourseFarPersp,
                   1.0f);
 #endif
     //gSPPerspNormalize(gDisplayListHead++, perspNorm);
     gSPMatrix(gDisplayListHead++, VIRTUAL_TO_PHYSICAL(&gGfxPool->mtxPersp[1]),
               G_MTX_NOPUSH | G_MTX_LOAD | G_MTX_PROJECTION);
-    guLookAt(&gGfxPool->mtxLookAt[1], camera->pos[0], camera->pos[1], camera->pos[2], camera->lookAt[0],
+    r37_guLookAt(&gGfxPool->mtxLookAt[1], camera->pos[0], camera->pos[1], camera->pos[2], camera->lookAt[0],
              camera->lookAt[1], camera->lookAt[2], camera->up[0], camera->up[1], camera->up[2]);
 
     if (D_800DC5C8 == 0) {
@@ -1210,7 +1510,7 @@ void render_player_one_3p_4p_screen(void) {
     Mat4 matrix;
 #ifdef VERSION_EU
     f32 sp9C;
-    sp9C = gScreenAspect * 1.2f;
+    sp9C = xbox_local_render_aspect(gScreenAspect) * 1.2f;
 #endif
 
     func_802A54A8();
@@ -1218,15 +1518,15 @@ void render_player_one_3p_4p_screen(void) {
     set_the_scissor(D_800DC5EC);
     gSPSetGeometryMode(gDisplayListHead++, G_ZBUFFER | G_SHADE | G_CULL_BACK | G_SHADING_SMOOTH);
 #ifdef VERSION_EU
-    guPerspective(&gGfxPool->mtxPersp[0], &perspNorm, gCameraZoom[0], sp9C, gCourseNearPersp, gCourseFarPersp, 1.0f);
+    r36_guPerspective(&gGfxPool->mtxPersp[0], &perspNorm, gCameraZoom[0], sp9C, gCourseNearPersp, gCourseFarPersp, 1.0f);
 #else
-    guPerspective(&gGfxPool->mtxPersp[0], &perspNorm, gCameraZoom[0], gScreenAspect, gCourseNearPersp, gCourseFarPersp,
+    r36_guPerspective(&gGfxPool->mtxPersp[0], &perspNorm, gCameraZoom[0], xbox_local_render_aspect(gScreenAspect), gCourseNearPersp, gCourseFarPersp,
                   1.0f);
 #endif
     //gSPPerspNormalize(gDisplayListHead++, perspNorm);
     gSPMatrix(gDisplayListHead++, VIRTUAL_TO_PHYSICAL(&gGfxPool->mtxPersp[0]),
               G_MTX_NOPUSH | G_MTX_LOAD | G_MTX_PROJECTION);
-    guLookAt(&gGfxPool->mtxLookAt[0], camera->pos[0], camera->pos[1], camera->pos[2], camera->lookAt[0],
+    r37_guLookAt(&gGfxPool->mtxLookAt[0], camera->pos[0], camera->pos[1], camera->pos[2], camera->lookAt[0],
              camera->lookAt[1], camera->lookAt[2], camera->up[0], camera->up[1], camera->up[2]);
 
     if (D_800DC5C8 == 0) {
@@ -1270,7 +1570,7 @@ void render_player_two_3p_4p_screen(void) {
     Mat4 matrix;
 #ifdef VERSION_EU
     f32 sp9C;
-    sp9C = gScreenAspect * 1.2f;
+    sp9C = xbox_local_render_aspect(gScreenAspect) * 1.2f;
 #endif
 
     func_802A5590();
@@ -1279,16 +1579,16 @@ void render_player_two_3p_4p_screen(void) {
     set_the_scissor(D_800DC5F0);
     gSPSetGeometryMode(gDisplayListHead++, G_ZBUFFER | G_SHADE | G_CULL_BACK | G_SHADING_SMOOTH);
 #ifdef VERSION_EU
-    guPerspective(&gGfxPool->mtxPersp[1], &perspNorm, gCameraZoom[1], sp9C, gCourseNearPersp, gCourseFarPersp, 1.0f);
+    r36_guPerspective(&gGfxPool->mtxPersp[1], &perspNorm, gCameraZoom[1], sp9C, gCourseNearPersp, gCourseFarPersp, 1.0f);
 #else
-    guPerspective(&gGfxPool->mtxPersp[1], &perspNorm, gCameraZoom[1], gScreenAspect, gCourseNearPersp, gCourseFarPersp,
+    r36_guPerspective(&gGfxPool->mtxPersp[1], &perspNorm, gCameraZoom[1], xbox_local_render_aspect(gScreenAspect), gCourseNearPersp, gCourseFarPersp,
                   1.0f);
 #endif
     //gSPPerspNormalize(gDisplayListHead++, perspNorm);
     gSPMatrix(gDisplayListHead++, VIRTUAL_TO_PHYSICAL(&gGfxPool->mtxPersp[1]),
               G_MTX_NOPUSH | G_MTX_LOAD | G_MTX_PROJECTION);
 
-    guLookAt(&gGfxPool->mtxLookAt[1], camera->pos[0], camera->pos[1], camera->pos[2], camera->lookAt[0],
+    r37_guLookAt(&gGfxPool->mtxLookAt[1], camera->pos[0], camera->pos[1], camera->pos[2], camera->lookAt[0],
              camera->lookAt[1], camera->lookAt[2], camera->up[0], camera->up[1], camera->up[2]);
     if (D_800DC5C8 == 0) {
         gSPMatrix(gDisplayListHead++, VIRTUAL_TO_PHYSICAL(&gGfxPool->mtxLookAt[1]),
@@ -1331,7 +1631,7 @@ void render_player_three_3p_4p_screen(void) {
     Mat4 matrix;
 #ifdef VERSION_EU
     f32 sp9C;
-    sp9C = gScreenAspect * 1.2f;
+    sp9C = xbox_local_render_aspect(gScreenAspect) * 1.2f;
 #endif
 
     func_802A5678();
@@ -1341,15 +1641,15 @@ void render_player_three_3p_4p_screen(void) {
 
     gSPSetGeometryMode(gDisplayListHead++, G_ZBUFFER | G_SHADE | G_CULL_BACK | G_SHADING_SMOOTH);
 #ifdef VERSION_EU
-    guPerspective(&gGfxPool->mtxPersp[2], &perspNorm, gCameraZoom[2], sp9C, gCourseNearPersp, gCourseFarPersp, 1.0f);
+    r36_guPerspective(&gGfxPool->mtxPersp[2], &perspNorm, gCameraZoom[2], sp9C, gCourseNearPersp, gCourseFarPersp, 1.0f);
 #else
-    guPerspective(&gGfxPool->mtxPersp[2], &perspNorm, gCameraZoom[2], gScreenAspect, gCourseNearPersp, gCourseFarPersp,
+    r36_guPerspective(&gGfxPool->mtxPersp[2], &perspNorm, gCameraZoom[2], xbox_local_render_aspect(gScreenAspect), gCourseNearPersp, gCourseFarPersp,
                   1.0f);
 #endif
     //gSPPerspNormalize(gDisplayListHead++, perspNorm);
     gSPMatrix(gDisplayListHead++, VIRTUAL_TO_PHYSICAL(&gGfxPool->mtxPersp[2]),
               G_MTX_NOPUSH | G_MTX_LOAD | G_MTX_PROJECTION);
-    guLookAt(&gGfxPool->mtxLookAt[2], camera->pos[0], camera->pos[1], camera->pos[2], camera->lookAt[0],
+    r37_guLookAt(&gGfxPool->mtxLookAt[2], camera->pos[0], camera->pos[1], camera->pos[2], camera->lookAt[0],
              camera->lookAt[1], camera->lookAt[2], camera->up[0], camera->up[1], camera->up[2]);
     if (D_800DC5C8 == 0) {
         gSPMatrix(gDisplayListHead++, VIRTUAL_TO_PHYSICAL(&gGfxPool->mtxLookAt[2]),
@@ -1393,7 +1693,7 @@ void render_player_four_3p_4p_screen(void) {
     Mat4 matrix;
 #ifdef VERSION_EU
     f32 sp9C;
-    sp9C = gScreenAspect * 1.2f;
+    sp9C = xbox_local_render_aspect(gScreenAspect) * 1.2f;
 #endif
 
     func_802A5760();
@@ -1411,15 +1711,15 @@ void render_player_four_3p_4p_screen(void) {
 
     gSPSetGeometryMode(gDisplayListHead++, G_ZBUFFER | G_SHADE | G_CULL_BACK | G_SHADING_SMOOTH);
 #ifdef VERSION_EU
-    guPerspective(&gGfxPool->mtxPersp[3], &perspNorm, gCameraZoom[3], sp9C, gCourseNearPersp, gCourseFarPersp, 1.0f);
+    r36_guPerspective(&gGfxPool->mtxPersp[3], &perspNorm, gCameraZoom[3], sp9C, gCourseNearPersp, gCourseFarPersp, 1.0f);
 #else
-    guPerspective(&gGfxPool->mtxPersp[3], &perspNorm, gCameraZoom[3], gScreenAspect, gCourseNearPersp, gCourseFarPersp,
+    r36_guPerspective(&gGfxPool->mtxPersp[3], &perspNorm, gCameraZoom[3], xbox_local_render_aspect(gScreenAspect), gCourseNearPersp, gCourseFarPersp,
                   1.0f);
 #endif
     //gSPPerspNormalize(gDisplayListHead++, perspNorm);
     gSPMatrix(gDisplayListHead++, VIRTUAL_TO_PHYSICAL(&gGfxPool->mtxPersp[3]),
               G_MTX_NOPUSH | G_MTX_LOAD | G_MTX_PROJECTION);
-    guLookAt(&gGfxPool->mtxLookAt[3], camera->pos[0], camera->pos[1], camera->pos[2], camera->lookAt[0],
+    r37_guLookAt(&gGfxPool->mtxLookAt[3], camera->pos[0], camera->pos[1], camera->pos[2], camera->lookAt[0],
              camera->lookAt[1], camera->lookAt[2], camera->up[0], camera->up[1], camera->up[2]);
     if (D_800DC5C8 == 0) {
         gSPMatrix(gDisplayListHead++, VIRTUAL_TO_PHYSICAL(&gGfxPool->mtxLookAt[3]),

@@ -16,6 +16,13 @@
 #    and torch's BaseFactory.h does `#define tab "	"`, so any TU that
 #    includes both fails to parse. fmt 10.2.1 is new enough for a recent Clang
 #    and old enough not to include chrono.h there.
+# 0. setup.py explicitly configures this pinned one-off third-party build just
+#    before invoking Ninja. Disable CMake's automatic build-system regeneration
+#    target here. On some Windows CMake/Ninja combinations the dependency
+#    tree's CONFIGURE_DEPENDS checks can otherwise re-run CMake indefinitely
+#    instead of compiling (the Ninja target count grows on every pass).
+set(CMAKE_SUPPRESS_REGENERATION ON)
+
 include(FetchContent)
 FetchContent_Declare(
     spdlog

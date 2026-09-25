@@ -1,6 +1,8 @@
 #include <ultra64.h>
 #include <macros.h>
-#if 0
+/* R20: Xbox uses the same 5120 IEEE-754 entries as the Xbox 360.
+ * The final quarter supports cosine's +0x400 offset without out-of-bounds reads. */
+#if defined(TARGET_XBOX)
 const f32 gSineTable[] = {
     0.000000000f, 0.0015339801f, 0.0030679568f, 0.004601926f, 0.0061358847f, 0.007669829f, 0.009203754f, 0.010737659f,
     0.012271538f, 0.0138053885f, 0.015339206f,  0.016872987f, 0.018406730f,  0.019940428f, 0.021474080f, 0.023007682f,

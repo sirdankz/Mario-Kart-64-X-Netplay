@@ -56,6 +56,7 @@ void func_80059024(void);
 void func_8005902C(void);
 void func_800590D4(void);
 void func_800591B4(void);
+int xbox_render_online_local_hud(void);
 void func_80059358(void);
 void render_hud_2p_horizontal_player_two_horizontal_player_one(void);
 void func_800593F0(void);

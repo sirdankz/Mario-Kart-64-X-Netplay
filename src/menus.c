@@ -7,6 +7,9 @@
 
 #include "menus.h"
 #include "main.h"
+#if defined(TARGET_XBOX)
+#include "xbox_netplay.h"
+#endif
 #include "code_800029B0.h"
 #include "actors.h"
 #include "audio/external.h"
@@ -1319,6 +1322,12 @@ void main_menu_act(struct Controller* controller, u16 controllerIdx) {
                     reset_cycle_flash_menu();
                     play_sound2(SOUND_MENU_CURSOR_MOVE);
                 }
+#if defined(TARGET_XBOX)
+                /* Match Xbox 360 2-4P netplay: the online session owns the
+                 * player count.  Do not let the normal local-only menu count
+                 * diverge between OG Xbox and Xbox 360. */
+                if (xbox_netplay_active()) gPlayerCount = xbox_netplay_player_count();
+#endif
                 gPlayerCountSelection1 = gPlayerCount;
                 switch (gPlayerCountSelection1) {
                     case 1:

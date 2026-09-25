@@ -744,6 +744,9 @@
     <ClCompile Include="Platform\xbox\xbox_savegame.c">
       <Filter>Platform\xbox</Filter>
     </ClCompile>
+    <ClCompile Include="Platform\xbox\xbox_netplay.cpp">
+      <Filter>Platform\xbox</Filter>
+    </ClCompile>
     <ClCompile Include="Platform\xbox\stubs_xbox.c">
       <Filter>Platform\xbox</Filter>
     </ClCompile>

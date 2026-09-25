@@ -1266,48 +1266,7 @@ s32 adjust_angle(s16* angle, s16 targetAngle, s16 step) {
     return 1;
 }
 
-void move_s32_towards(s32* startingValue, s32 targetValue, f32 somePercent) {
-    *startingValue -= ((*startingValue - targetValue) * somePercent);
-}
-
-/**
-  * Function: move_f32_towards
-
-  * Parameters:
-  *     f32 *startingValue - Pointer to the float that will be modified
-  *     f32 targetValue    - Float value to move startingValue towards
-  *     f32 somePercent    - The percent of the difference between startingValue
-                            and targetValue to actually move
-
-  * Moves a given startingValue the given somePercent towards the targetValue
-
-  * f32 *thing = 2500;
-  * move_f32_towards(thing, 500, 0.75f);
-  * thing now has a value of 1000
-
-  * If after the move startingValue is inside of the range [-0.001, 0.001],
-  * force it to exactly 0.0f
-
-  * This is probably a precision thing. The scaling with somePercent likely
-  * can't hit exactly 0 with any reliability, so they force it to 0 if you're
-  * in a small range around it. Why they only do this for 0 is anyone's guess though
-**/
-void move_f32_towards(f32* startingValue, f32 targetValue, f32 somePercent) {
-    f32 sv = *startingValue;
-    sv -= ((sv - targetValue) * somePercent);
-    if ((sv < 0.001f) && (-0.001f < sv)) {
-        sv = 0.0f;
-    }
-    *startingValue = sv;
-}
-
-void move_s16_towards(s16* startingValue, s16 targetValue, f32 somePercent) {
-    *startingValue -= ((*startingValue - targetValue) * somePercent);
-}
-
-void move_u16_towards(u16* startingValue, s16 targetValue, f32 somePercent) {
-    *startingValue -= ((*startingValue - targetValue) * somePercent);
-}
+#include "canonical_approach.inc.h"
 
 void func_80022744(void) {
     func_8006E058();

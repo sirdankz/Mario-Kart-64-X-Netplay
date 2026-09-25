@@ -13,13 +13,9 @@
  * exploits array sizes for range analysis-based optimizations as well).
  * Thus, for non-IDO compilers we use the standard-compliant version.
  */
-#if 0
-extern f32 gSineTable[];
-#ifdef AVOID_UB
+#if defined(TARGET_XBOX)
+extern const f32 gSineTable[0x1400];
 #define gCosineTable (gSineTable + 0x400)
-#else
-extern f32 gCosineTable[];
-#endif
 #endif
 extern s16 gArctanTable[];
 

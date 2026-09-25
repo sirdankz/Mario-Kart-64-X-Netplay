@@ -236,6 +236,17 @@ static int thumb_to_joy(SHORT v) {
     return j;
 }
 
+/* MK64 R33 OG full-down signed-byte guard.
+ * joyy follows the Dreamcast convention (positive == down).  Negating an
+ * Xbox full-down sample used to turn -128 into +128, which cannot fit in the
+ * signed 8-bit joy field and wrapped back to -128 (full UP).  Clamp the
+ * pre-negated minimum to -127 so straight-down remains +127. */
+static int thumb_to_dc_y(SHORT v) {
+    int j = thumb_to_joy(v);
+    if (j < -127) j = -127;
+    return -j;
+}
+
 void *maple_dev_status(maple_device_t *dev) {
     if (!dev || !dev->h) return NULL;
 
@@ -306,10 +317,10 @@ void *maple_dev_status(maple_device_t *dev) {
      * 0xff - (uint8_t)joyy before scaling. Negating the (positive-up) Xbox
      * axis here reproduces that convention, so the game's mapping code needs
      * no change. */
-    s->joyx  =  thumb_to_joy(g->sThumbLX);
-    s->joyy  = -thumb_to_joy(g->sThumbLY);
-    s->joy2x =  thumb_to_joy(g->sThumbRX);
-    s->joy2y = -thumb_to_joy(g->sThumbRY);
+    s->joyx  = thumb_to_joy(g->sThumbLX);
+    s->joyy  = thumb_to_dc_y(g->sThumbLY);
+    s->joy2x = thumb_to_joy(g->sThumbRX);
+    s->joy2y = thumb_to_dc_y(g->sThumbRY);
 
     return s;
 }

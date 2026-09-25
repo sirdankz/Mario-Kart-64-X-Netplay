@@ -201,6 +201,7 @@
         "Platform/xbox/kos_xbox.c",
         "src/staff_ghosts.c",
         "Platform/xbox/xbox_savegame.c",
+        "Platform/xbox/xbox_netplay.cpp",
         "Platform/xbox/stubs_xbox.c",
         "courses/staff_ghost_data.c",
         "Platform/xbox/gen_seg/ceremony_data_blob.c",
@@ -228,6 +229,7 @@
       ],
       "libraries": [
         "libxapid.lib",
+        "libxnetd.lib",
         "libd3d8d.lib",
         "libd3dx8d.lib",
         "libxgraphicsd.lib",
@@ -485,6 +487,7 @@
         "Platform/xbox/kos_xbox.c",
         "src/staff_ghosts.c",
         "Platform/xbox/xbox_savegame.c",
+        "Platform/xbox/xbox_netplay.cpp",
         "Platform/xbox/stubs_xbox.c",
         "courses/staff_ghost_data.c",
         "Platform/xbox/gen_seg/ceremony_data_blob.c",
@@ -512,6 +515,7 @@
       ],
       "libraries": [
         "libxapi.lib",
+        "libxnet.lib",
         "libd3d8.lib",
         "libd3dx8.lib",
         "libxgraphics.lib",

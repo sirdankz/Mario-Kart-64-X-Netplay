@@ -1,3 +1,4 @@
+#include "canonical_gameplay.h"
 #include <defines.h>
 #include <mk64.h>
 #include <course.h>
@@ -25,6 +26,10 @@
 #include "menu_items.h"
 #include "effects.h"
 #include "decode.h"
+
+#if defined(TARGET_XBOX)
+extern void xbox_netplay_trace(const char *fmt, ...);
+#endif
 
 f32 D_80165210[8];
 f32 D_80165230[8];
@@ -77,6 +82,11 @@ void spawn_player(Player* player, s8 playerIndex, f32 startingRow, f32 startingC
                   u16 characterId, s16 playerType) {
     f32 ret;
     s8 idx;
+#if defined(TARGET_XBOX)
+    xbox_netplay_trace("R12_SPAWN P%d ENTER char=%u type=%04X start=(%.2f,%.2f) yProbe=%.2f rot=%.2f\n",
+                       (int)playerIndex + 1, (unsigned)characterId, (unsigned)((u16)playerType),
+                       startingRow, startingColumn, arg4, arg5);
+#endif
 
     player->type = PLAYER_INACTIVE;
     player->unk_08C = 0;
@@ -112,7 +122,13 @@ void spawn_player(Player* player, s8 playerIndex, f32 startingRow, f32 startingC
     }
 
     player->pos[0] = startingRow;
+#if defined(TARGET_XBOX)
+    xbox_netplay_trace("R12_SPAWN P%d PRE get_surface_height bbox=%.3f\n", (int)playerIndex + 1, player->boundingBoxSize);
+#endif
     ret = get_surface_height(startingRow, arg4 + 50.0f, startingColumn) + player->boundingBoxSize;
+#if defined(TARGET_XBOX)
+    xbox_netplay_trace("R12_SPAWN P%d POST get_surface_height y=%.3f\n", (int)playerIndex + 1, ret);
+#endif
     player->pos[2] = startingColumn;
     player->pos[1] = ret;
     player->oldPos[0] = startingRow;
@@ -364,6 +380,11 @@ void spawn_player(Player* player, s8 playerIndex, f32 startingRow, f32 startingC
                                  player->rotation[1]);
     calculate_orientation_matrix(player->orientationMatrix, player->unk_058, player->unk_05C, player->unk_060,
                                  player->rotation[1]);
+#if defined(TARGET_XBOX)
+    xbox_netplay_trace("R12_SPAWN P%d EXIT pos=(%.2f,%.2f,%.2f) type=%04X lap=%d speed=%.3f\n",
+                       (int)playerIndex + 1, player->pos[0], player->pos[1], player->pos[2],
+                       (unsigned)player->type, (int)player->lapCount, player->speed);
+#endif
 }
 
 void func_80039AE4(void) {
@@ -841,6 +862,12 @@ void spawn_players_for_ending(void) {
 }
 
 void init_race_and_spawn_players(void) {
+#if defined(TARGET_XBOX)
+    xbox_netplay_trace("R12_INITSPAWN ENTER course=%d activeSM=%d mode=%d pc=%d chars=%d,%d,%d,%d\n",
+                       (int)gCurrentCourseId, (int)gActiveScreenMode, (int)gModeSelection,
+                       (int)gPlayerCountSelection1, (int)gCharacterSelections[0], (int)gCharacterSelections[1],
+                       (int)gCharacterSelections[2], (int)gCharacterSelections[3]);
+#endif
     s16 sp5E;
     s16 sp5C;
     s16 sp5A;
@@ -863,7 +890,13 @@ void init_race_and_spawn_players(void) {
         case COURSE_RAINBOW_ROAD:
         case COURSE_WARIO_STADIUM:
         case COURSE_DK_JUNGLE:
+#if defined(TARGET_XBOX)
+            xbox_netplay_trace("R12_INITSPAWN PRE init_course_path_point\n");
+#endif
             init_course_path_point();
+#if defined(TARGET_XBOX)
+            xbox_netplay_trace("R12_INITSPAWN POST init_course_path_point\n");
+#endif
             sp5E = (f32) gTrackPaths[0][0].posX;
             sp5C = (f32) gTrackPaths[0][0].posZ;
             sp5A = (f32) gTrackPaths[0][0].posY;
@@ -1193,13 +1226,25 @@ void func_8003CD98(Player* player, Camera* camera, s8 playerId, s8 screenId) {
 void func_8003D080(void) {
 //    UNUSED s32 pad;
     Player* player = &gPlayers[0];
-
+#if defined(TARGET_XBOX)
+    xbox_netplay_trace("R12_3D080 00 ENTER activeSM=%d mode=%d pc=%d course=%d\n",
+                       (int)gActiveScreenMode, (int)gModeSelection, (int)gPlayerCountSelection1, (int)gCurrentCourseId);
+    xbox_netplay_trace("R12_3D080 01 PRE load_race_common_tex\n");
+#endif
     load_race_common_tex();
+#if defined(TARGET_XBOX)
+    xbox_netplay_trace("R12_3D080 02 POST load_race_common_tex PRE init/spawn\n");
+#endif
     if (gGamestate == ENDING) {
         func_8003CD78();
     } else {
         init_race_and_spawn_players();
     }
+#if defined(TARGET_XBOX)
+    xbox_netplay_trace("R12_3D080 03 POST init/spawn p1=(%.2f,%.2f,%.2f) p2=(%.2f,%.2f,%.2f) PRE camera init\n",
+                       gPlayers[0].pos[0], gPlayers[0].pos[1], gPlayers[0].pos[2],
+                       gPlayers[1].pos[0], gPlayers[1].pos[1], gPlayers[1].pos[2]);
+#endif
     if (!gDemoMode) {
         switch (gActiveScreenMode) {
             case SCREEN_MODE_1P:
@@ -1346,6 +1391,9 @@ void func_8003D080(void) {
             func_8003CD98(gPlayerFour, camera4, 3, 3);
             break;
     }
+#if defined(TARGET_XBOX)
+    xbox_netplay_trace("R12_3D080 04 EXIT cam/player init complete\n");
+#endif
 }
 
 void func_8003DB5C(void) {

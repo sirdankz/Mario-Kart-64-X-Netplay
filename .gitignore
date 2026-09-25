@@ -226,3 +226,5 @@ tools/torch/
 # Visual Studio (mk64x.sln is committed; these are per-user)
 /.vs/
 *.vcxproj.user
+
+/tools/torch-build/

@@ -1,3 +1,4 @@
+#include "canonical_gameplay.h"
 #include <ultra64.h>
 #include <macros.h>
 #include <defines.h>
@@ -101,7 +102,13 @@ u16 gPlayersTrackSectionId[12];
 u16 D_80163330[10];
 u16 D_80163344[2];
 u16 D_80163348[2];
-u16 D_8016334C[2];
+/*
+ * R29 CROSSPLAY UB FIX:
+ * D_8016334C is indexed by playerId throughout CPU logic, including IDs 2..7.
+ * Two elements therefore made those accesses undefined on the ports.
+ * Keep one deterministic entry per racer/CPU slot.
+ */
+u16 D_8016334C[10];
 u16 gSpeedCPUBehaviour[12];
 s32 gSizePath[4];
 s32 gIncrementUpdatePlayer;
@@ -1410,6 +1417,7 @@ void update_player(s32 playerId) {
     f32 onePointFive = 1.5f;
 
     player = &gPlayers[playerId];
+    mk64_r27_cpu_checkpoint(0, playerId);
     if ((s32) GET_COURSE_AIMaximumSeparation >= 0) {
         D_80163100[playerId] += 1;
         if (playerId == 0) {
@@ -1456,17 +1464,23 @@ void update_player(s32 playerId) {
                 player->effects &= ~REVERSE_EFFECT;
                 player->unk_044 &= ~0x0001;
             }
+            mk64_r27_cpu_checkpoint(1, playerId);
             update_player_path_completion(playerId, player);
+            mk64_r27_cpu_checkpoint(2, playerId);
             if ((gCurrentCourseId != COURSE_AWARD_CEREMONY) && ((D_80163240[playerId] == 1) || (playerId == 0))) {
                 set_places();
             }
             if (player->type & PLAYER_CPU) {
                 if ((gIsPlayerNewPathPoint == 1) && (gCurrentCourseId != COURSE_AWARD_CEREMONY)) {
+                    mk64_r27_cpu_checkpoint(3, playerId);
                     cpu_behaviour(playerId);
+                    mk64_r27_cpu_checkpoint(4, playerId);
                 }
                 // one update it try to use an item, the other it doesn't
                 if ((playerId & 1) != (gIncrementUpdatePlayer & 1)) {
+                    mk64_r27_cpu_checkpoint(5, playerId);
                     cpu_use_item_strategy(playerId);
+                    mk64_r27_cpu_checkpoint(6, playerId);
                 }
                 update_player_timer_sound(playerId, player);
                 D_80162FD0 = 0;
@@ -1521,8 +1535,12 @@ void update_player(s32 playerId) {
                     D_801630E8[playerId] = 0;
                     player->effects &= ~0x10;
                     if ((playerId & 1) != (gIncrementUpdatePlayer & 1)) {
+                        mk64_r27_cpu_checkpoint(11, playerId);
                         apply_cpu_turn(player, 0);
+                        mk64_r27_cpu_checkpoint(12, playerId);
+                        mk64_r27_cpu_checkpoint(13, playerId);
                         regulate_cpu_speed(playerId, gPreviousCpuTargetSpeed[playerId], player);
+                        mk64_r27_cpu_checkpoint(14, playerId);
                         return;
                     }
                     if ((gPlayerCount > 0) && (gPlayerCount < 3) && (D_80163330[playerId] == 1) &&
@@ -1537,8 +1555,12 @@ void update_player(s32 playerId) {
                         gPreviousCpuTargetSpeed[playerId] = GET_COURSE_cpu_NormalTargetSpeed(gCCSelection);
                     }
                     check_ai_crossing_distance(playerId);
+                    mk64_r27_cpu_checkpoint(7, playerId);
                     cpu_track_position_factor(playerId);
+                    mk64_r27_cpu_checkpoint(8, playerId);
+                    mk64_r27_cpu_checkpoint(9, playerId);
                     determine_ideal_cpu_position_offset(playerId, gCurrentNearestPathPoint);
+                    mk64_r27_cpu_checkpoint(10, playerId);
                     distX = gOffsetPosition[0] - player->pos[0];
                     minAngle = gOffsetPosition[2] - player->pos[2];
                     if (!(player->effects & 0x80) && !(player->effects & 0x40) && !(player->effects & 0x800)) {
@@ -1558,8 +1580,12 @@ void update_player(s32 playerId) {
                                                      [(gCurrentNearestPathPoint + 4) % gSelectedPathCount];
                         }
                     }
+                    mk64_r27_cpu_checkpoint(11, playerId);
                     apply_cpu_turn(player, 0);
+                    mk64_r27_cpu_checkpoint(12, playerId);
+                    mk64_r27_cpu_checkpoint(13, playerId);
                     regulate_cpu_speed(playerId, gPreviousCpuTargetSpeed[playerId], player);
+                    mk64_r27_cpu_checkpoint(14, playerId);
                     return;
                 }
                 if ((D_801630E8[playerId] == 1) || (D_801630E8[playerId] == -1)) {
@@ -1610,12 +1636,18 @@ void update_player(s32 playerId) {
                 }
 
                 if ((playerId & 1) != (gIncrementUpdatePlayer & 1)) {
+                    mk64_r27_cpu_checkpoint(11, playerId);
                     apply_cpu_turn(player, gPreviousAngleSteering[playerId]);
+                    mk64_r27_cpu_checkpoint(12, playerId);
+                    mk64_r27_cpu_checkpoint(13, playerId);
                     regulate_cpu_speed(playerId, gPreviousCpuTargetSpeed[playerId], player);
+                    mk64_r27_cpu_checkpoint(14, playerId);
                     return;
                 }
                 gIsPlayerInCurve[playerId] = are_in_curve(playerId, sSomeNearestPathPoint);
+                mk64_r27_cpu_checkpoint(9, playerId);
                 determine_ideal_cpu_position_offset(playerId, sSomeNearestPathPoint);
+                mk64_r27_cpu_checkpoint(10, playerId);
                 if (gCurrentCourseId != COURSE_AWARD_CEREMONY) {
                     if (gNumPathPointsTraversed[playerId] < 0xB) {
                         pathIndex = gCurrentNearestPathPoint;
@@ -1718,7 +1750,9 @@ void update_player(s32 playerId) {
                 } else {
                     newAngle = (gPreviousAngleSteering[playerId] + ((angle * steeringSensitivity) / minAngle)) / 2;
                 }
+                mk64_r27_cpu_checkpoint(11, playerId);
                 apply_cpu_turn(player, newAngle);
+                mk64_r27_cpu_checkpoint(12, playerId);
                 gPreviousAngleSteering[playerId] = newAngle;
                 if ((gIsPlayerInCurve[playerId] == 1) || (D_801630E8[playerId] == 1) ||
                     (D_801630E8[playerId] == -1) ||
@@ -1740,7 +1774,9 @@ void update_player(s32 playerId) {
                 player->effects &= ~CPU_FAST_EFFECT;
                 gPreviousCpuTargetSpeed[playerId] = gCurrentCpuTargetSpeed;
                 check_ai_crossing_distance(playerId);
+                mk64_r27_cpu_checkpoint(13, playerId);
                 regulate_cpu_speed(playerId, gCurrentCpuTargetSpeed, player);
+                mk64_r27_cpu_checkpoint(14, playerId);
             }
         }
     }
@@ -2129,6 +2165,8 @@ void init_players(void) {
         gPlayersTrackSectionId[i] = 0;
         gPreviousPlayerZ[i] = player->pos[2];
         gCurrentPlayerLookAhead[i] = 6;
+        /* R29: deterministic per-player owner/index state. */
+        D_8016334C[i] = 0;
         if (gPlayers[i].type & PLAYER_HUMAN) {
             D_80163330[i] = 3;
 
@@ -4599,4 +4637,22 @@ UNUSED void func_8001C42C(void) {
         gSPDisplayList(gDisplayListHead++, D_0D0076F8);
         func_80057CE4();
     }
+}
+
+/* R27: typed AI diagnostics stay in the translation unit owning these globals. */
+static u32 r27_cpu_bits(f32 value) { union { f32 f; u32 u; } bits; bits.f=value; return bits.u; }
+void mk64_r27_cpu_ai(unsigned int *w, int playerId) {
+    Player *p = &gPlayers[playerId];
+    extern unsigned int mk64_astra_rng_call_count(void);
+    w[39] = (u32)p->unk_07C; w[40] = (u32)(u16)p->unk_078;
+    w[41] = r27_cpu_bits(gTrackPositionFactor[playerId]); w[42] = r27_cpu_bits(cpu_TargetSpeed[playerId]);
+    w[43] = r27_cpu_bits(gPreviousCpuTargetSpeed[playerId]);
+    w[44] = r27_cpu_bits(gOffsetPosition[0]); w[45] = r27_cpu_bits(gOffsetPosition[2]);
+    w[46] = r27_cpu_bits(gPlayerPathY[playerId]); w[47] = (u32)(u16)gNearestPathPointByPlayerId[playerId];
+    w[48] = (u32)gPlayerPathIndex;
+    w[49] = r27_cpu_bits(gPlayerTrackPositionFactorInstruction[playerId].current);
+    w[50] = r27_cpu_bits(gPlayerTrackPositionFactorInstruction[playerId].target);
+    w[51] = r27_cpu_bits(gPreviousPlayerAiOffsetX[playerId]); w[52] = r27_cpu_bits(gPreviousPlayerAiOffsetZ[playerId]);
+    w[53] = r27_cpu_bits(gCourseCompletionPercentByPlayerId[playerId]);
+    w[54] = mk64_astra_rng_call_count(); w[55] = r27_cpu_bits(gCurrentCpuTargetSpeed);
 }

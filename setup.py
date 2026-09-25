@@ -71,7 +71,7 @@ ROM_MD5 = "3a67d9986f54eb282924fca4cd5f6dff"
 # same RXDK_STAGED_TOOLS override the extensions honour -- see tools/hostenv.py.
 RXDK = hostenv.rxdk_cli()
 EXE = hostenv.EXE
-TORCH_BUILD = "tools/torch/build"
+TORCH_BUILD = "tools/torch-build"
 FORCE_NATIVE_TORCH = False          # --native-torch; see ensure_torch()
 
 # torch extracts the ROM into ~180 source files. It is fetched and built by
@@ -362,7 +362,7 @@ def ensure_torch():
     if not t:
         raise SystemExit(
             "torch built without error but no torch binary was found under\n"
-            "tools/torch. Look in %s for it and, if it is\n"
+            "the configured Torch build directory. Look in %s and, if it is\n"
             "somewhere unexpected, add that path to torch_exe() in setup.py."
             % TORCH_BUILD)
     return t
