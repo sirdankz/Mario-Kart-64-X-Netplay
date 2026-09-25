@@ -1,3 +1,6 @@
+// Copyright (c) 2026 sirdankz
+// SPDX-License-Identifier: GPL-3.0-only
+// See NETPLAY-LICENSE.md for license scope.
 #ifndef MK64X_XBOX_NETPLAY_H
 #define MK64X_XBOX_NETPLAY_H
 

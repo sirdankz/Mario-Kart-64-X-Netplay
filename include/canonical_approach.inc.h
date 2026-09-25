@@ -1,3 +1,6 @@
+// Copyright (c) 2026 sirdankz
+// SPDX-License-Identifier: GPL-3.0-only
+// See NETPLAY-LICENSE.md for license scope.
 /* R27: shared gameplay approach helpers, despite their original location in
  * render_player.c. CPU steering, suspension and item effects call these too.
  * Volatile binary32 intermediates prevent multiply-subtract contraction without

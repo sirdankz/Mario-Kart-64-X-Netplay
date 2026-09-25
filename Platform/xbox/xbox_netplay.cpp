@@ -1,3 +1,6 @@
+// Copyright (c) 2026 sirdankz
+// SPDX-License-Identifier: GPL-3.0-only
+// See NETPLAY-LICENSE.md for license scope.
 #include <xtl.h>
 #include <stdio.h>
 #include <stdlib.h>

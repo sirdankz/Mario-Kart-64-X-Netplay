@@ -1,207 +1,130 @@
-# Mario Kart 64 for the original Xbox
+# Mario-Kart-64-X-Netplay
 
-A native Xbox port of the [Mario Kart 64 decompilation](https://github.com/n64decomp/mk64),
-built on [jnmartin84's Dreamcast port](https://github.com/jnmartin84/mario-kart-64-dc).
-Direct3D 8 / NV2A rendering, DirectSound audio, XInput, memory-card saves.
-Runs at 30 fps on real hardware.
+Original Xbox netplay and Xbox 360 crossplay additions for
+[Team Resurgent's Mario-Kart-64-X](https://github.com/Team-Resurgent/Mario-Kart-64-X).
 
-## This repository contains no game assets
+The base port is a native Original Xbox port of the
+[Mario Kart 64 decompilation](https://github.com/n64decomp/mk64), built on
+[jnmartin84's Dreamcast port](https://github.com/jnmartin84/mario-kart-64-dc).
 
-**You have to supply your own Mario Kart 64 ROM.** Nothing ROM-derived is in
-this repo — no textures, no audio, no course data. The build extracts all of it
-from your own copy at build time.
+## Netplay
 
-Please don't ask for a prebuilt ISO, and please don't post one. Build it
-yourself, or don't play it.
+This fork adds online multiplayer support to the Original Xbox port and a shared
+deterministic netplay protocol for Xbox 360 crossplay.
+
+For cross-console play, the currently supported setup is:
+
+```text
+Xbox 360 = host
+Original Xbox = join
+```
+
+The netplay work includes deterministic gameplay synchronization, local-player
+handling, per-player rendering/camera behavior, online pause/lifecycle sync,
+and per-player presentation/audio fixes needed for multiplayer.
+
+Normal offline play remains available.
+
+## No ROM or generated game assets are included
+
+You must supply your own Mario Kart 64 ROM.
+
+Use the USA big-endian `.z64` ROM named exactly:
+
+```text
+baserom.us.z64
+```
+
+Expected MD5:
+
+```text
+3a67d9986f54eb282924fca4cd5f6dff
+```
+
+`.n64` and `.v64` dumps are byte-swapped and are not accepted by the build.
 
 ## Requirements
 
-| | |
-|---|---|
-| **The ROM** | Mario Kart 64 (USA), **big-endian `.z64`**, named exactly `baserom.us.z64`, in the repo root. md5 `3a67d9986f54eb282924fca4cd5f6dff` |
-| **[RXDK](https://github.com/Team-Resurgent/RXDK-VS20XX)** | The Xbox toolchain, from either the VS Code or the Visual Studio extension. `setup.py` finds `Rxdk.Cli` where the extension staged it (`%ProgramData%\RXDK\tools` on Windows, `~/Library/Application Support/RXDK/tools` on macOS, `~/.local/share/rxdk/tools` on Linux) and honours `RXDK_STAGED_TOOLS` |
-| **Python 3** | Drives the asset pipeline. (Pillow is needed only by `tools/make_xbx.py`, the art tool that regenerates the committed dashboard-icon BMPs; the build itself does not import it) |
-| **git** | `setup.py` uses it to fetch `torch` on the first run |
-| **CMake** | Used once, to build `torch`. Optional: if none is on PATH, `setup.py` downloads Kitware's portable build into `tools/cmake-bin/` |
+- Python 3
+- git
+- [RXDK](https://github.com/Team-Resurgent/RXDK-VS20XX)
+- CMake, or allow `setup.py` to obtain the portable build it expects
 
-Nothing else. The six small native asset tools are compiled by `setup.py`
-with RXDK's own host-capable `clang`, so no MinGW, MSYS2 or `make` install is
-needed. `$CC`, or `cc`/`gcc`/`clang` on PATH, are used if you prefer them.
+`setup.py` fetches and builds its pinned Torch dependency as needed.
 
-`torch` is a C++20 project, built by default with that same RXDK `clang`,
-downloading the `ninja` build tool into `tools/ninja/` to drive CMake. So a
-Windows machine with no Visual Studio at all still builds. Pass `--native-torch`
-to build it with a native toolchain instead: Visual Studio 2022 with the
-"Desktop development with C++" workload (the free Build Tools edition is enough)
-on Windows, Xcode command line tools on macOS, gcc or clang on Linux.
+## Build from a fresh clone
 
-A `.n64` or `.v64` dump will **not** work. Those are byte-swapped, so every
-offset the extractors use lands in the wrong place. Convert to `.z64` first.
-The build checks the md5 and refuses to run on the wrong ROM rather than
-producing something subtly broken.
-
-## Building
-
-Three steps:
-
-```
-git clone https://github.com/Team-Resurgent/Mario-Kart-64-X
-cd Mario-Kart-64-X
+```text
+git clone https://github.com/sirdankz/Mario-Kart-64-X-Netplay.git
+cd Mario-Kart-64-X-Netplay
 ```
 
-Drop your ROM in the repo root as `baserom.us.z64`, then, **from a terminal**
-(Command Prompt, PowerShell or Git Bash — not IDLE):
+Copy your own `baserom.us.z64` into the repository root, then run:
 
-```
+```text
 python setup.py
 ```
 
-> Run it from IDLE and it will refuse. IDLE executes your code without a
-> console, so Windows opens a new console window for every one of the many
-> thousands of helper processes the build starts — windows flashing endlessly,
-> and a build that takes hours instead of minutes.
+A successful Release build ends with:
 
-That is the whole build. It ends with:
-
-```
+```text
 out\Release\XISO\mk64x.iso
 ```
 
-Copy that to your Xbox however you normally do.
-
-**The first run takes a while.** Before it can touch the ROM, `setup.py` fetches
-and builds `torch` (the asset extractor) and compiles six small native tools.
-That is a one-off; later runs skip it.
-
-torch is fetched by `setup.py` rather than carried as a git submodule. A
-submodule would still leave you running CMake and patching torch's link line by
-hand, while adding `--recursive`, a network dependency at clone time, and a
-failure mode that breaks GUI git clients. It is pinned to a known-good commit,
-fetched explicitly because that commit is not on torch's default branch, and
-its `wininet` link fix is applied for you.
+The repository has been tested from a fresh GitHub clone with only the user's
+own ROM added locally.
 
 ### setup.py options
 
-```
-python setup.py                # full build
-python setup.py --check        # list what is missing, change nothing
-python setup.py --force        # re-run every step, even satisfied ones
-python setup.py --skip-build   # generate assets, stop before RXDK
-python setup.py --config Debug # Debug instead of Release
-python setup.py --native-torch # build torch with the native toolchain, not RXDK clang
-```
-
-Re-running is cheap and safe. Steps that can be skipped declare their outputs
-and are skipped when those exist; steps that derive from compiled objects
-always re-run, because a stale output from those is silently wrong rather than
-missing.
-
-`--check` reporting "13 of 24 steps still to run" on a fully built tree is
-normal — those thirteen are the always-run ones.
-
-## Working in Visual Studio
-
-**Run `python setup.py` at least once first.** It produces everything the
-project compiles that is not in the repo: the 180 torch-generated sources,
-the `.incbin` payloads, the assembly wrappers under `Platform/xbox/gen*`, and
-the `dc_data` runtime set. None of that exists on a fresh clone, and Visual
-Studio does not know how to make it.
-
-After that, open `mk64x.sln` (RXDK for Visual Studio 2022 or 2026 with the
-Xbox platform installed). Build, Deploy and F5 go through the same RXDK
-engine `setup.py` uses, so a code change is an ordinary edit → Build → run
-loop. Re-run `setup.py` only when something upstream of the C code changes:
-the ROM, the asset yamls, or the tools that generate the wrappers.
-
-Same convention as RXDK-Samples: **`mk64x.vcxproj` is the authoritative
-project file**, and the committed `rxdk.project.json` is derived from it. The
-json is what `setup.py` and the VS Code extension read, on every platform,
-so after adding a source or changing a property in Visual Studio, regenerate
-it and commit both:
-
-```
-python tools/gen_manifest.py           # regenerate rxdk.project.json from the .vcxproj
-python tools/gen_manifest.py --check   # exit 1 if the committed json is stale
+```text
+python setup.py
+python setup.py --check
+python setup.py --force
+python setup.py --skip-build
+python setup.py --config Debug
+python setup.py --native-torch
 ```
 
-It runs the RXDK Xbox platform's `RxdkGenerateManifest` MSBuild target once
-per configuration and merges the pair, exactly as the samples' generator
-does, so it needs Windows with Visual Studio and the Xbox platform installed.
-Everyone else just uses the committed json. Visual Studio itself builds from
-`out/rxdk.manifest.json`, which it derives from the `.vcxproj` on every build;
-it never writes `rxdk.project.json`.
+Run `python setup.py` at least once before opening the project for normal
+Visual Studio build/deploy work because the setup process generates the
+ROM-derived files that are intentionally not stored in Git.
 
-## What the build actually does
+## Before publishing changes
 
-Roughly: build the native helpers → run torch → extract assets from the ROM →
-apply several ROM-truth fixups → generate the C wrappers RXDK can compile →
-build → dump the runtime data set out of the resulting objects → build again.
+Run:
 
-The order is load-bearing in a few places that are not obvious, and each of
-those is commented in `setup.py` where it matters. The two worth knowing about
-if you go poking:
-
-- The RXDK build runs **twice**. `gen_segblobs` and `gen_dcdata` read the
-  compiled objects, so they need a first pass; the second pass packs what they
-  produced into the ISO.
-- Several steps deliberately **overwrite** what `gen_dcdata` wrote. It builds
-  the sound segments by concatenating `.incbin` targets, which drops the
-  headers `sequences.s` and `instrument_sets.s` carry, and it sources
-  `common_data.bin` from an array the game byteswaps at boot. Left alone, the
-  first breaks audio at boot and the second renders the shells as transparent
-  rainbow noise.
-
-## Debugging
-
-Two compile-time switches in `Platform/xbox/xbox_debug.h`, both off:
-
-- `MK64X_DEBUG_TOOLS` — WHITE button dumps a one-shot geometry census, texture
-  and palette state, and a voice census to xbWatson. Also enables the
-  NaN/matrix/ceremony diagnostics. **Only ever one-shot:** the xbdm channel
-  blocks once its buffer fills, so anything printing per-frame stalls the game.
-- `MK64X_CEREMONY_JUMP` — BOTH TRIGGERS + BACK jumps straight to the award
-  ceremony from anywhere. Deliberately a separate switch, so you can reach the
-  ceremony without turning the dumps on.
-
-With both off, a clean run prints nothing. Messages that only appear when
-something is actually wrong (bucket overflow, allocation failure, save errors)
-are always compiled in and are throttled.
-
-To decode a crash address from an xbWatson `Exception:` line:
-
-```
-python tools/symbolize.py 0x000DA8A9
-```
-
-Addresses are build-specific — pass `--pdb <path>` for a PDB other than the
-current build's.
-
-## Before you publish a fork
-
-```
+```text
 python tools/audit_repo_clean.py
 ```
 
-It lists what a fresh clone would commit and fails if any of it is ROM-derived:
-verbatim ROM bytes in either byte order, raw asset payloads, build output, and
-ROM data hiding as C hex literals. Exit code 1 means don't push.
+Exit code `0` is required before publishing. The audit checks the publishable
+tree for ROM-derived payloads, build output, and other generated game data.
 
-## Saves
+Do not commit or distribute `baserom.us.z64`, generated ROM assets, an XBE, or
+an XISO/ISO.
 
-Race records and time-trial ghosts save to a memory card or the HDD through a
-single dashboard save container. The N64's EEPROM and Controller Pak are both
-backed by files inside it.
+## Netplay license
 
-If a ghost refuses to save with `RACE DATA CANNOT BE SAVED FOR GHOST`, that is
-the original game: MK64 voids the recording if you take a hit from a course
-hazard, pause mid-run, or exceed the replay buffer.
+The original netplay/crossplay code authored by sirdankz is licensed
+`GPL-3.0-only`.
+
+See:
+
+- `NETPLAY-LICENSE.md` for the exact scope
+- `COPYING.NETPLAY` for the GNU GPL version 3 text
+
+This GPL notice does **not** relicense the entire upstream repository. Existing
+Mario-Kart-64-X, MK64 decompilation, Dreamcast-port, RXDK, Nintendo, and other
+third-party material remains subject to the rights and terms of its respective
+authors.
 
 ## Credits
 
-- [n64decomp/mk64](https://github.com/n64decomp/mk64) — the decompilation
-- [jnmartin84](https://github.com/jnmartin84) — the Dreamcast port this is
-  based on. Its build guide is preserved here as `README.dreamcast.md`
+- [Team Resurgent / Mario-Kart-64-X](https://github.com/Team-Resurgent/Mario-Kart-64-X) — Original Xbox base port
+- [n64decomp/mk64](https://github.com/n64decomp/mk64) — Mario Kart 64 decompilation
+- [jnmartin84](https://github.com/jnmartin84) — Dreamcast port
 - [HarbourMasters/torch](https://github.com/HarbourMasters/torch) — asset extraction
-- [RXDK](https://github.com/Team-Resurgent/RXDK-VS20XX) — the Xbox toolchain
+- [RXDK](https://github.com/Team-Resurgent/RXDK-VS20XX) — Original Xbox toolchain
 
-Mario Kart 64 is Nintendo's. This project ships none of it.
+Mario Kart 64 and related game content are Nintendo's. This repository does
+not include a Mario Kart 64 ROM or generated ROM-derived asset payloads.

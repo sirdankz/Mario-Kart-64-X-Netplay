@@ -1,3 +1,6 @@
+// Copyright (c) 2026 sirdankz
+// SPDX-License-Identifier: GPL-3.0-only
+// See NETPLAY-LICENSE.md for license scope.
 #ifndef MK64_CANONICAL_GAMEPLAY_H
 #define MK64_CANONICAL_GAMEPLAY_H
 /* R27: only simulation translation units include this header. Preserve OG C

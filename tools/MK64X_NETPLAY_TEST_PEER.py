@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 sirdankz
+# SPDX-License-Identifier: GPL-3.0-only
+# See NETPLAY-LICENSE.md for license scope.
 r"""MK64X protocol-v4 handshake test peer.
 
 This does NOT emulate Mario Kart gameplay.  It only proves that the OG Xbox
