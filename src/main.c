@@ -298,8 +298,39 @@ static int even_frame;
 // Consumers: race_logic_loop (below) + code_80057C60.c (func_8005C728 / update_object).
 extern volatile uint64_t vblticker;   // 60Hz hardware vblank count (vblfunc, below)
 s16 gRun30hz = 1;
+/* MK64_R66_OG_60HZ_NETPLAY: only an explicitly negotiated OG V11 online race may run at 60Hz.
+ * Menu/countdown/results/pause remain 30Hz, including in V11 sessions. */
+#if defined(TARGET_XBOX)
+static u32 sR66NetClockFrame = 0;
+static u32 sR66NetClockTicks = 0;
+static int mk64_r66_online_60fps_active(void) {
+    return xbox_netplay_60fps_session() && gGamestate == RACING &&
+        D_800DC510 == 3 && gModeSelection != TIME_TRIALS &&
+        gDemoMode == DEMO_MODE_INACTIVE && gIsGamePaused == 0 &&
+        gIsInQuitToMenuTransition == 0;
+}
+#endif
+
+#if defined(TARGET_XBOX)
+/* MK64_R45_CONTROLS_PREMENU
+ * L3 + R3 + LT + RT held for 0.4s returns to the premenu in-process.
+ * A peer GOODBYE follows the same path. */
+static int r45_runtime_premenu(void) {
+    int requested = xbox_controls_return_chord_pressed() || xbox_netplay_return_requested();
+    if (!requested) return 0;
+    /* R57: the old in-process premenu reset left renderer/game/network globals
+     * alive and a second online session could not start reliably. Relaunch the
+     * XBE instead so this path is equivalent to a fresh boot. */
+    xbox_netplay_full_restart();
+    return 1;
+}
+#endif
 
 void game_loop_one_iteration(void) {
+#if defined(TARGET_XBOX)
+    xbox_netplay_pump();
+    if (r45_runtime_premenu()) return;
+#endif
     even_frame = !((frameno++) & 1);
     {
         static uint64_t last_30hz_vbl = 0;
@@ -309,7 +340,8 @@ void game_loop_one_iteration(void) {
          * Never let OG Xbox's independent 60 Hz hardware vblank decide whether
          * a simulation update runs while online. */
         if (xbox_netplay_active()) {
-            gRun30hz = 1;
+            gRun30hz = mk64_r66_online_60fps_active()
+                ? ((xbox_netplay_frame() & 1U) == 0U) : 1;
             last_30hz_vbl = vblticker;
         } else
 #endif
@@ -321,6 +353,14 @@ void game_loop_one_iteration(void) {
         }
     }
 
+#if defined(TARGET_XBOX)
+    if (xbox_netplay_60fps_session()) {
+        /* Canonical BEFORE the state hash is sampled during read_controllers. */
+        gGlobalTimer = (s32)xbox_netplay_frame();
+        gVBlankTimer = (f32)sR66NetClockTicks * (1.0f / 60.0f);
+        sNumVBlanks = mk64_r66_online_60fps_active() ? 1 : 2;
+    }
+#endif
     gfx_start_frame();
 
 #if defined(TARGET_XBOX)
@@ -415,6 +455,20 @@ void game_loop_one_iteration(void) {
     }
 #endif
     read_controllers();
+#if defined(TARGET_XBOX)
+    if (xbox_netplay_60fps_session()) {
+        const u32 nextFrame = xbox_netplay_frame();
+        /* V11 time is the integer sum of 60Hz ticks, not local video vblanks.
+         * This preserves real time through 30Hz countdown/pause -> 60Hz racing. */
+        if (nextFrame == sR66NetClockFrame + 1U) {
+            sR66NetClockTicks += mk64_r66_online_60fps_active() ? 1U : 2U;
+            sR66NetClockFrame = nextFrame;
+        }
+        gGlobalTimer = (s32)nextFrame;
+        gVBlankTimer = (f32)sR66NetClockTicks * (1.0f / 60.0f);
+        sNumVBlanks = mk64_r66_online_60fps_active() ? 1 : 2;
+    }
+#endif
 
 #if defined(TARGET_XBOX)
     /*
@@ -450,9 +504,11 @@ void game_loop_one_iteration(void) {
         /* Make the MK64-visible clocks canonical at the host-committed frame.
          * Rendering/vblank remains local presentation timing. */
         gGlobalTimer = (s32)xbox_netplay_frame();
-        gVBlankTimer = r22_crossplay_frame_time(xbox_netplay_frame());
-        sNumVBlanks = 2;
-        gRun30hz = 1;
+        if (!xbox_netplay_60fps_session()) {
+            gVBlankTimer = r22_crossplay_frame_time(xbox_netplay_frame());
+            sNumVBlanks = 2;
+            gRun30hz = 1;
+        }
 
         if (gGamestateNext != gGamestate) {
             xbox_netplay_trace("R12_TRANS PRE frame=%u gs=%d next=%d rs=%u course=%d activeSM=%d selSM=%d pc=%d\n",
@@ -662,6 +718,26 @@ void xbox_crossplay_state_apply(const unsigned char *in,int len){
     gRandomSeed16=(u16)XG32(100);
 #undef XG32
     gVBlankTimer=xplay_state_bits_f32(xplay_state_get32(in+104));
+    /* R72: V11 countdown -> GO may change cadence on different local race
+     * states. Rebase the guest's PRIVATE integer tick accumulator to the
+     * authoritative 360 host clock while strict STATE_SYNC is still active.
+     * Otherwise the next iteration overwrites the host's replicated timer
+     * with the guest's stale 30Hz/60Hz accumulator, causing a hash mismatch.
+     * No changes to 30Hz V10, race physics or wire protocol. */
+    if(xbox_netplay_60fps_session() && xbox_netplay_crossplay() &&
+       gVBlankTimer>=0.0f && gVBlankTimer<100000.0f){
+        const u32 hostTicks=(u32)(gVBlankTimer*60.0f+0.5f);
+        static unsigned r72RebaseLogs=0;
+        if(hostTicks!=sR66NetClockTicks && gGamestate==RACING &&
+           r72RebaseLogs<12U){
+            xbox_netplay_trace("R72_RATE_REBASE frame=%u hostRS=%u localRS=%u hostTicks=%u guestTicks=%u\n",
+                (unsigned)xbox_netplay_frame(),(unsigned)xplay_state_get32(in+96),
+                (unsigned)D_800DC510,(unsigned)hostTicks,(unsigned)sR66NetClockTicks);
+            ++r72RebaseLogs;
+        }
+        sR66NetClockTicks=hostTicks;
+        sR66NetClockFrame=(u32)gGlobalTimer;
+    }
     gCourseTimer=xplay_state_bits_f32(xplay_state_get32(in+108));
     for(i=0;i<4;++i)gCharacterSelections[i]=(s8)in[112+i];
     for(i=0;i<4;++i)gCharacterGridSelections[i]=(s8)in[116+i];
@@ -1698,6 +1774,33 @@ void update_controller(s32 index) {
 #include <arch/arch.h>
 extern void AicaSynth_Shutdown(void);
 
+#if defined(TARGET_XBOX)
+/* MK64_R58_6_CONTROLLER_DISCONNECT_SAFETY
+ *
+ * A hot-unplug can race between XGetDevices()/maple_enum_type() and
+ * XInputGetState()/maple_dev_status().  The old code dereferenced a NULL
+ * status in that window.  It could also leave the previous held buttons and
+ * stick values alive when a physical read failed.
+ *
+ * Track whether THIS frame produced a complete physical sample and release
+ * any previously held local state immediately on failure.  Netplay then
+ * submits a deterministic neutral pad instead of waiting, crashing, or
+ * repeating stale input. */
+static u8 sXboxControllerPollOk[4] = { 0, 0, 0, 0 };
+
+static void xbox_neutralize_disconnected_controller(struct Controller *controller) {
+    if (!controller) return;
+    controller->rawStickX = 0;
+    controller->rawStickY = 0;
+    controller->buttonPressed = 0;
+    controller->buttonDepressed = controller->button;
+    controller->button = 0;
+    controller->stickPressed = 0;
+    controller->stickDepressed = controller->stickDirection;
+    controller->stickDirection = 0;
+}
+#endif
+
 void update_controller(s32 index) {
     struct Controller* controller = &gControllers[index];
     maple_device_t *cont;
@@ -1707,14 +1810,27 @@ void update_controller(s32 index) {
 
     if (index > 3)
         return;
+#if defined(TARGET_XBOX)
+    sXboxControllerPollOk[index] = 0;
+#endif
     if((1 << index) == gKeyboardBit) {
         update_keyboard(index);
         return;
     }
     cont = maple_enum_type(index, MAPLE_FUNC_CONTROLLER);
-    if (!cont)
+    if (!cont) {
+#if defined(TARGET_XBOX)
+        xbox_neutralize_disconnected_controller(controller);
+#endif
         return;
+    }
     state = maple_dev_status(cont);
+    if (!state) {
+#if defined(TARGET_XBOX)
+        xbox_neutralize_disconnected_controller(controller);
+#endif
+        return;
+    }
 
     if (strcmp("/pc", fnpre) == 0) {
         if ((state->buttons & CONT_START) && 
@@ -1734,47 +1850,45 @@ void update_controller(s32 index) {
         }
     }
 
+#if defined(TARGET_XBOX)
+    {
+        uint16_t xboxButtons = 0;
+        int8_t xboxStickX = 0, xboxStickY = 0;
+        if (!xbox_controls_read_n64(index, &xboxButtons, &xboxStickX, &xboxStickY)) {
+            xbox_neutralize_disconnected_controller(controller);
+            return;
+        }
+        controller->rawStickX = xboxStickX;
+        controller->rawStickY = xboxStickY;
+        ucheld = xboxButtons;
+        sXboxControllerPollOk[index] = 1;
+    }
+#else
     const char stickH =state->joyx;
     const char stickV = 0xff-((uint8_t)(state->joyy));
     controller->rawStickX = ((float)stickH/127)*80;
     controller->rawStickY = ((float)stickV/127)*80;
 
-    if (state->buttons & CONT_A)
-        ucheld |= 0x8000; //A_BUTTON
+    if (state->buttons & CONT_A) ucheld |= 0x8000;
 #if defined(BUTTON_SWAP_X)
-    if (state->buttons & CONT_X)
-        ucheld |= 0x0001; //C_RIGHT
-    if (state->buttons & CONT_B)
-        ucheld |= 0x4000; //B_BUTTON
+    if (state->buttons & CONT_X) ucheld |= 0x0001;
+    if (state->buttons & CONT_B) ucheld |= 0x4000;
 #else
-    if (state->buttons & CONT_X)
-        ucheld |= 0x4000; //B_BUTTON
-    if (state->buttons & CONT_B)
-        ucheld |= 0x0001; //C_RIGHT
+    if (state->buttons & CONT_X) ucheld |= 0x4000;
+    if (state->buttons & CONT_B) ucheld |= 0x0001;
 #endif
-
     if (state->ltrig) {
-        if (gGamestate > 3) // DC L is N64 Z in-game
-            ucheld |= 0x2000; //Z_TRIG
-        else // DC L becomes N64 L in-menu
-            ucheld |= 0x0020; //L_TRIG
+        if (gGamestate > 3) ucheld |= 0x2000;
+        else ucheld |= 0x0020;
     }
-    if (state->buttons & CONT_START)
-       ucheld |= 0x1000; //START_BUTTON
-
-    if (state->buttons & CONT_DPAD_UP)
-        ucheld |= 0x0800; //U_JPAD
-    if (state->buttons & CONT_DPAD_DOWN)
-        ucheld |= 0x0400; //D_JPAD
-    if (state->buttons & CONT_DPAD_LEFT)
-        ucheld |= 0x0200; //L_JPAD
-    if (state->buttons & CONT_DPAD_RIGHT)
-        ucheld |= 0x0100; //R_JPAD
-
-    if (state->rtrig)
-        ucheld |= 0x0010; //R_TRIG
-    if (state->buttons & CONT_Y)
-        ucheld |= 0x0008; //C_UP
+    if (state->buttons & CONT_START)      ucheld |= 0x1000;
+    if (state->buttons & CONT_DPAD_UP)    ucheld |= 0x0800;
+    if (state->buttons & CONT_DPAD_DOWN)  ucheld |= 0x0400;
+    if (state->buttons & CONT_DPAD_LEFT)  ucheld |= 0x0200;
+    if (state->buttons & CONT_DPAD_RIGHT) ucheld |= 0x0100;
+    if (state->rtrig)                     ucheld |= 0x0010;
+    if (state->buttons & CONT_Y)          ucheld |= 0x0008;
+#endif
 
     controller->buttonPressed = ucheld & (ucheld ^ controller->button);
     controller->buttonDepressed = controller->button & (ucheld ^ controller->button);
@@ -1820,7 +1934,8 @@ void read_controllers(void) {
          * vblank cadence is presentation timing; online simulation time is
          * derived from the synchronized input frame so OG/360 cannot drift
          * merely because their video loops run at slightly different times. */
-        gVBlankTimer = r22_crossplay_frame_time(xbox_netplay_frame());
+        if (!xbox_netplay_60fps_session())
+            gVBlankTimer = r22_crossplay_frame_time(xbox_netplay_frame());
 
         struct XboxNetPadCompat {
             u16 button;
@@ -1835,12 +1950,12 @@ void read_controllers(void) {
             int sy = (int)gControllers[net_i].rawStickY;
             if (sx < -128) sx = -128; if (sx > 127) sx = 127;
             if (sy < -128) sy = -128; if (sy > 127) sy = 127;
-            /* update_controller() leaves the previous sample intact when a
-             * physical controller disappears. Tell netplay explicitly whether
-             * this physical port is present so a disconnected local pad cannot
-             * keep sending stale held buttons/steering. Remote logical pads are
-             * overwritten by xbox_netplay_controllers() after lockstep. */
-            if (maple_enum_type(net_i, MAPLE_FUNC_CONTROLLER) != NULL) {
+            /* R58.6 uses the result of the exact physical poll performed just
+             * above, rather than re-enumerating the port a second time.  That
+             * closes the hot-unplug race between enumeration and state read.
+             * A missing/failed controller is still submitted to lockstep as a
+             * neutral pad, so every peer continues receiving an input frame. */
+            if (sXboxControllerPollOk[net_i]) {
                 pads[net_i].button = gControllers[net_i].button;
                 pads[net_i].stick_x = (s8)sx;
                 pads[net_i].stick_y = (s8)sy;
@@ -2645,6 +2760,28 @@ void game_init_clear_framebuffer(void) {
     clear_framebuffer(0);
 }
 extern int force_30fps;
+/* MK64_R63_OFFLINE_60FPS_TEST: experimental offline-only 60 Hz race path.
+ * GameShark writes are MIPS RAM addresses, never native port offsets.
+ * Result screens, countdown, demos, pauses and Time Trials stay 30 Hz. */
+#if defined(TARGET_XBOX)
+#ifndef MK64_OFFLINE_60FPS_TEST
+#define MK64_OFFLINE_60FPS_TEST 1
+#endif
+static int mk64_offline_60fps_active(void) {
+    return MK64_OFFLINE_60FPS_TEST && !xbox_netplay_active() &&
+        gGamestate == RACING && D_800DC510 == 3 &&
+        gModeSelection != TIME_TRIALS && gDemoMode == DEMO_MODE_INACTIVE &&
+        gIsGamePaused == 0 && gIsInQuitToMenuTransition == 0;
+}
+static int mk64_r66_any_60fps_active(void) {
+    return mk64_offline_60fps_active() || mk64_r66_online_60fps_active();
+}
+static int mk64_r63_offline_steps(s16 vblanks) {
+    if (!mk64_offline_60fps_active()) return 2;
+    return (vblanks < 1) ? 1 : ((vblanks > 4) ? 4 : vblanks);
+}
+#endif
+
 static void r25_capture(u32 phase,u32 tick);
 void race_logic_loop(void) {
     s16 i;
@@ -2688,7 +2825,7 @@ void race_logic_loop(void) {
     }
 
 #if defined(TARGET_XBOX)
-    if (xbox_netplay_active()) sNumVBlanks = 2;
+    if (xbox_netplay_active()) sNumVBlanks = mk64_r66_online_60fps_active() ? 1 : 2;
 #endif
     if (sNumVBlanks >= 6) {
         sNumVBlanks = 5;
@@ -2715,8 +2852,8 @@ void race_logic_loop(void) {
             // the fullscreen RANKING screen while gamestate is still RACING — that pseudo-1P
             // must stay capped, or its flashing text (per-frame counters) runs at whatever
             // rate frames arrive (HW 2026-08-19). gPlayerCountSelection1 survives the switch.
-            force_30fps = 1;//(gPlayerCountSelection1 == 1) ? 0 : 1;
-            gTickSpeed = 2;//sNumVBlanks;
+            force_30fps = mk64_r66_any_60fps_active() ? 0 : 1;
+            gTickSpeed = mk64_r66_online_60fps_active() ? 1 : mk64_r63_offline_steps(sNumVBlanks);
 
             // 60fps 30Hz gate (gRun30hz, see game_loop_one_iteration): ghost replay is a
             // frame-count-addressed input stream (2x at 60fps would desync).
@@ -2807,7 +2944,7 @@ void race_logic_loop(void) {
             break;
 
         case SCREEN_MODE_2P_SPLITSCREEN_VERTICAL:
-            force_30fps = 1;
+            force_30fps = mk64_r66_any_60fps_active() ? 0 : 1;
 #if defined(TARGET_XBOX)
             if (r12Trace) xbox_netplay_trace("R12_RACE %d 2PV branch enter sNumVBlanks=%d\n", r12RaceFrames, (int)sNumVBlanks);
 #endif
@@ -2825,8 +2962,9 @@ void race_logic_loop(void) {
             // automatically get the smooth 2-tick treatment as renderer perf improves.
             // Clamped [2,4]: 4 = the N64's own DK-Jungle-in-4P floor, also covers spikes.
             #if defined(TARGET_XBOX)
-            gTickSpeed = xbox_netplay_active() ? 2 :
-                ((sNumVBlanks < 2) ? 2 : ((sNumVBlanks > 4) ? 4 : sNumVBlanks));
+            gTickSpeed = xbox_netplay_active() ? (mk64_r66_online_60fps_active() ? 1 : 2) :
+                (mk64_offline_60fps_active() ? mk64_r63_offline_steps(sNumVBlanks) :
+                ((sNumVBlanks < 2) ? 2 : ((sNumVBlanks > 4) ? 4 : sNumVBlanks)));
 #else
             gTickSpeed = (sNumVBlanks < 2) ? 2 : ((sNumVBlanks > 4) ? 4 : sNumVBlanks);
 #endif
@@ -2973,7 +3111,7 @@ void race_logic_loop(void) {
             break;
 
         case SCREEN_MODE_2P_SPLITSCREEN_HORIZONTAL:
-            force_30fps = 1;
+            force_30fps = mk64_r66_any_60fps_active() ? 0 : 1;
 #if defined(TARGET_XBOX)
             if (r12Trace) xbox_netplay_trace("R12_RACE %d 2PH branch enter sNumVBlanks=%d\n", r12RaceFrames, (int)sNumVBlanks);
 #endif
@@ -2992,8 +3130,9 @@ void race_logic_loop(void) {
             // automatically get the smooth 2-tick treatment as renderer perf improves.
             // Clamped [2,4]: 4 = the N64's own DK-Jungle-in-4P floor, also covers spikes.
             #if defined(TARGET_XBOX)
-            gTickSpeed = xbox_netplay_active() ? 2 :
-                ((sNumVBlanks < 2) ? 2 : ((sNumVBlanks > 4) ? 4 : sNumVBlanks));
+            gTickSpeed = xbox_netplay_active() ? (mk64_r66_online_60fps_active() ? 1 : 2) :
+                (mk64_offline_60fps_active() ? mk64_r63_offline_steps(sNumVBlanks) :
+                ((sNumVBlanks < 2) ? 2 : ((sNumVBlanks > 4) ? 4 : sNumVBlanks)));
 #else
             gTickSpeed = (sNumVBlanks < 2) ? 2 : ((sNumVBlanks > 4) ? 4 : sNumVBlanks);
 #endif
@@ -3141,7 +3280,7 @@ void race_logic_loop(void) {
             break;
 
         case SCREEN_MODE_3P_4P_SPLITSCREEN:
-            force_30fps = 1;
+            force_30fps = mk64_r66_any_60fps_active() ? 0 : 1;
 
             /* if (gPlayerCountSelection1 == 3) {
                 switch (gCurrentCourseId) {
@@ -3179,8 +3318,9 @@ void race_logic_loop(void) {
             // automatically get the smooth 2-tick treatment as renderer perf improves.
             // Clamped [2,4]: 4 = the N64's own DK-Jungle-in-4P floor, also covers spikes.
             #if defined(TARGET_XBOX)
-            gTickSpeed = xbox_netplay_active() ? 2 :
-                ((sNumVBlanks < 2) ? 2 : ((sNumVBlanks > 4) ? 4 : sNumVBlanks));
+            gTickSpeed = xbox_netplay_active() ? (mk64_r66_online_60fps_active() ? 1 : 2) :
+                (mk64_offline_60fps_active() ? mk64_r63_offline_steps(sNumVBlanks) :
+                ((sNumVBlanks < 2) ? 2 : ((sNumVBlanks > 4) ? 4 : sNumVBlanks)));
 #else
             gTickSpeed = (sNumVBlanks < 2) ? 2 : ((sNumVBlanks > 4) ? 4 : sNumVBlanks);
 #endif

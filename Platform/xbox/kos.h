@@ -133,6 +133,8 @@ void vid_border_color(int r, int g, int b);
 #define CONT_Y          (1u << 9)
 #define CONT_X          (1u << 10)
 #define CONT_D          (1u << 11)
+#define CONT_LTHUMB     (1u << 12)
+#define CONT_RTHUMB     (1u << 13)
 
 typedef struct { int is_down; } kbd_key_state_t;
 
@@ -152,6 +154,55 @@ void            xbox_input_init(void);
 
 maple_device_t *maple_enum_type(int index, uint32_t function);
 void           *maple_dev_status(maple_device_t *dev);
+
+/*
+ * MK64_R45_CONTROLS_PREMENU
+ * Physical Xbox source IDs used by the persistent controller-rebinding UI.
+ * These are local input settings only; netplay still transmits ordinary N64
+ * button/stick values after the mapping is applied.
+ */
+enum {
+    XBOX_CTRL_SRC_A = 0,
+    XBOX_CTRL_SRC_B,
+    XBOX_CTRL_SRC_X,
+    XBOX_CTRL_SRC_Y,
+    XBOX_CTRL_SRC_WHITE,
+    XBOX_CTRL_SRC_BLACK,
+    XBOX_CTRL_SRC_LT,
+    XBOX_CTRL_SRC_RT,
+    XBOX_CTRL_SRC_BACK,
+    XBOX_CTRL_SRC_START,
+    XBOX_CTRL_SRC_L3,
+    XBOX_CTRL_SRC_R3,
+    XBOX_CTRL_SRC_UP,
+    XBOX_CTRL_SRC_DOWN,
+    XBOX_CTRL_SRC_LEFT,
+    XBOX_CTRL_SRC_RIGHT,
+    XBOX_CTRL_SRC_RUP,
+    XBOX_CTRL_SRC_RDOWN,
+    XBOX_CTRL_SRC_RLEFT,
+    XBOX_CTRL_SRC_RRIGHT,
+    XBOX_CTRL_SRC_LUP,
+    XBOX_CTRL_SRC_LDOWN,
+    XBOX_CTRL_SRC_LLEFT,
+    XBOX_CTRL_SRC_LRIGHT,
+    XBOX_CTRL_SOURCES
+};
+#define XBOX_CTRL_ACTIONS 14
+#define XBOX_CTRL_UNBOUND 255
+
+void         xbox_controls_load(void);
+int          xbox_controls_save(void);
+const char  *xbox_control_action(int action);
+const char  *xbox_control_binding(int player, int action);
+void         xbox_control_bind(int player, int action, int source);
+void         xbox_control_defaults(int player);
+int          xbox_control_stick(int player, int change);
+int          xbox_control_deadzone(int player, int change);
+int          xbox_control_sensitivity(int player, int change);
+unsigned int xbox_controls_down(void);
+int          xbox_controls_read_n64(int port, uint16_t *buttons, int8_t *stick_x, int8_t *stick_y);
+int          xbox_controls_return_chord_pressed(void);
 
 
 /* ================================================================= fmath ==

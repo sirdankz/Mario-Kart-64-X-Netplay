@@ -1,5 +1,5 @@
 // Copyright (c) 2026 sirdankz
-// SPDX-License-Identifier: GPL-3.0-only
+// SPDX-License-Identifier: MPL-2.0
 // See NETPLAY-LICENSE.md for license scope.
 #ifndef MK64X_XBOX_NETPLAY_H
 #define MK64X_XBOX_NETPLAY_H
@@ -25,10 +25,16 @@ void xbox_netplay_pump(void);
 void xbox_netplay_controllers(void *pads, int count);
 void xbox_netplay_set_menu_sync(int enabled);
 void xbox_netplay_shutdown(void);
+int xbox_netplay_return_requested(void);
+void xbox_netplay_clear_return_request(void);
+/* R57: relaunch the title so all game/network globals are rebuilt cleanly. */
+void xbox_netplay_full_restart(void);
 
 int xbox_netplay_active(void);
 int xbox_netplay_hosting(void);
 int xbox_netplay_crossplay(void);
+/* R66: negotiated V11 OG-to-OG 60Hz lockstep (never Xbox 360 crossplay). */
+int xbox_netplay_60fps_session(void);
 int xbox_netplay_player_count(void);
 int xbox_netplay_local_slot(void);
 int xbox_netplay_local_count(void);

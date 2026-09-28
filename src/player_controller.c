@@ -25,6 +25,34 @@
 #include "cpu_vehicles_camera_path.h"
 #include "sounds.h"
 
+#if defined(TARGET_XBOX)
+#include "xbox_netplay.h"
+/*
+ * MK64_R46_REMOTE_ENGINE_AUDIO
+ *
+ * MK64 already has two engine models:
+ *   func_800C94A4 = direct/local human engine
+ *   func_800C9A88 = positional opponent/CPU engine
+ *
+ * Online remote humans should use the same positional engine path that
+ * ordinary 1-player opponents use.
+ */
+static void r46_start_kart_engine_audio(s8 playerId) {
+    if (xbox_netplay_active()) {
+        int first = xbox_netplay_local_slot();
+        int count = xbox_netplay_local_count();
+        if (first >= 0 && count > 0 &&
+            (playerId < first || playerId >= first + count)) {
+            func_800C9A88((u8)playerId);
+            return;
+        }
+    }
+    func_800C94A4((u8)playerId);
+}
+#else
+#define r46_start_kart_engine_audio(playerId) func_800C94A4((u8)(playerId))
+#endif
+
 
 extern s32 D_8018D168;
 
@@ -226,7 +254,7 @@ void func_80027DA8(Player* player, s8 playerId) {
     if (D_8015F890 != 1) {
         if ((player->type & 0x10) != 0x10) {
             if (((D_8018D168 == 1) && ((player->type & PLAYER_HUMAN) == 0x4000)) && ((player->type & 0x100) != 0x100)) {
-                func_800C94A4(playerId);
+                r46_start_kart_engine_audio(playerId);
                 player->type |= 0x10;
             } else if ((player->type & 0x2000) == 0) {
                 func_800C9A88(playerId);
@@ -235,7 +263,7 @@ void func_80027DA8(Player* player, s8 playerId) {
         }
     } else if ((player->type & 0x10) != 0x10) {
         if ((D_8018D168 == 1) && (player == gPlayerOne)) {
-            func_800C94A4(playerId);
+            r46_start_kart_engine_audio(playerId);
             player->type |= 0x10;
         } else if ((player->type & 0x2000) == 0) {
             func_800C9A88(playerId);

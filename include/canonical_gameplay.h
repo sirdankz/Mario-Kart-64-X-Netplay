@@ -1,5 +1,5 @@
 // Copyright (c) 2026 sirdankz
-// SPDX-License-Identifier: GPL-3.0-only
+// SPDX-License-Identifier: MPL-2.0
 // See NETPLAY-LICENSE.md for license scope.
 #ifndef MK64_CANONICAL_GAMEPLAY_H
 #define MK64_CANONICAL_GAMEPLAY_H

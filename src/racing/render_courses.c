@@ -45,10 +45,28 @@ extern int xbox_netplay_local_count(void);
 static int xbox_local_fullscreen_jumbotron(void) {
     return xbox_netplay_active() && xbox_netplay_local_count() == 1;
 }
+
+/* MK64_R67_OG_NET_JUMBOTRON */
+/* MK64_R67_OG_NET_JUMBOTRON: refresh at most once per rendered video frame,
+ * even when the native multiplayer simulation visits several camera panes.
+ * This helper ONLY schedules cosmetic framebuffer readback. */
+static int r67_jumbotron_capture_online(void) { return xbox_netplay_active(); }
+static int r67_jumbotron_once_per_frame(void) {
+    static s32 lastFrame = -1;
+    static s32 lastCourse = -1;
+    if (!xbox_netplay_active()) return 1;
+    if (lastFrame == gGlobalTimer && lastCourse == gCurrentCourseId) return 0;
+    lastFrame = gGlobalTimer;
+    lastCourse = gCurrentCourseId;
+    return 1;
+}
 #else
 static int xbox_local_fullscreen_jumbotron(void) {
     return 0;
 }
+/* Non-Xbox backends retain their existing jumbotron refresh policy. */
+static int r67_jumbotron_capture_online(void) { return 0; }
+static int r67_jumbotron_once_per_frame(void) { return 1; }
 #endif
 #if defined(TARGET_XBOX)
 #include "xbox_debug.h"
@@ -70,28 +88,12 @@ s16 D_802B87D0 = 0;
 s16 D_802B87D4 = 0;
 s16 currentScreenSection = 0;
 
-/* Jumbotron refresh policy (Luigi Raceway's archway screen, Wario Stadium's
- * big screen).
- *
- * The screen is six 64x32 textures, and the N64 refreshes exactly ONE of them
- * per frame, cycling through all six -- the whole picture is 6 frames old at
- * its worst, which is the visibly banded, low-refresh look the real game has.
- * This port had been rebuilding ALL SIX every frame instead: six times the
- * framebuffer readback and six texture re-uploads.
- *
- * That is affordable on the N64 and the Dreamcast, where the framebuffer is
- * ordinary memory the CPU reads at full speed. On Xbox the back buffer lives
- * in uncached GPU memory (~17MB/s for CPU reads, which is why a full-frame
- * grab costs ~70ms), so six sections per frame is what dropped these two
- * courses from 30 to 20 fps.
- *
- * Kept at 1 (all six, every frame) because the banded one-section refresh
- * looks visibly worse than this port had been shipping. The cost was instead
- * removed at the source: xbox_vram_snapshot_rect now reads only the pixel
- * lattice the copy actually samples (every 2nd pixel of every 2nd row), which
- * is a quarter of the back-buffer traffic. Set to 0 for the N64's true
- * one-section-per-frame cadence. */
-#define JUMBOTRON_ALL_SECTIONS_PER_FRAME 1
+/* MK64_R67_OG_NET_JUMBOTRON:
+ * The OG Xbox's 1-local-player ONLINE fullscreen rendering runs multiplayer
+ * simulation but displays one camera. Keep OFFLINE's original six-section
+ * refresh untouched. ONLINE uses the N64-like single-section update, preserving
+ * the rect-only GPU readback optimization and reducing CPU/GPU work.
+ */
 
 s32 func_80290C20(Camera* camera) {
     /* This briefly returned 0 unconditionally on Xbox, to suppress every
@@ -998,13 +1000,15 @@ void render_luigi_raceway(struct UnkStruct_800DC5EC* arg0) {
     // Render only the first player camera onto the television billboard. Screen agnostic screens of other players).
     if ((gActiveScreenMode != SCREEN_MODE_1P) &&
         !xbox_local_fullscreen_jumbotron() &&
-        (sp22 >= 10) && (sp22 < 17)) {
+        (sp22 >= 10) && (sp22 < 17) &&
+        r67_jumbotron_once_per_frame()) {
         luigi_jumbotron();
     }
     if (((gActiveScreenMode == SCREEN_MODE_1P) ||
          xbox_local_fullscreen_jumbotron()) &&
-        (sp22 >= 10) && (sp22 < 17)) {
-#if JUMBOTRON_ALL_SECTIONS_PER_FRAME
+        (sp22 >= 10) && (sp22 < 17) &&
+        r67_jumbotron_once_per_frame()) {
+        if (!r67_jumbotron_capture_online()) {
         prevFrame = (s16) sRenderedFramebuffer - 1;
 
         if (prevFrame < 0) {
@@ -1040,7 +1044,7 @@ void render_luigi_raceway(struct UnkStruct_800DC5EC* arg0) {
                           (u16*) PHYSICAL_TO_VIRTUAL(gPhysicalFramebuffers[prevFrame]),
                           (u16*) PHYSICAL_TO_VIRTUAL(segmented_to_virtual(gLRTexture683118)));
         gfx_texture_cache_invalidate(gLRTexture683118);
-#else
+        } else {
         prevFrame = (s16) sRenderedFramebuffer - 1;
 
         if (prevFrame < 0) {
@@ -1094,7 +1098,7 @@ void render_luigi_raceway(struct UnkStruct_800DC5EC* arg0) {
                 gfx_texture_cache_invalidate(gLRTexture683118);
                 break;
         }
-#endif
+        }
     }
 }
 
@@ -1285,12 +1289,14 @@ void render_wario_stadium(struct UnkStruct_800DC5EC* arg0) {
     D_800DC5DC = 88;
     D_800DC5E0 = 72;
     if ((gActiveScreenMode != SCREEN_MODE_1P) &&
-        !xbox_local_fullscreen_jumbotron()) {
+        !xbox_local_fullscreen_jumbotron() &&
+        r67_jumbotron_once_per_frame()) {
         wario_jumbotron();
     }
-    else if ((gActiveScreenMode == SCREEN_MODE_1P) ||
-             xbox_local_fullscreen_jumbotron()) {
-#if JUMBOTRON_ALL_SECTIONS_PER_FRAME
+    else if (((gActiveScreenMode == SCREEN_MODE_1P) ||
+              xbox_local_fullscreen_jumbotron()) &&
+             r67_jumbotron_once_per_frame()) {
+        if (!r67_jumbotron_capture_online()) {
         prevFrame = (s16) sRenderedFramebuffer - 1;
         if (prevFrame < 0) {
             prevFrame = 2;
@@ -1326,7 +1332,7 @@ void render_wario_stadium(struct UnkStruct_800DC5EC* arg0) {
                           (u16*) PHYSICAL_TO_VIRTUAL(gPhysicalFramebuffers[prevFrame]),
                           (u16*) PHYSICAL_TO_VIRTUAL(gWSTexture683118)); // gSegmentTable[5] + 0xD800));
         gfx_texture_cache_invalidate(gWSTexture683118);
-#else
+        } else {
         prevFrame = (s16) sRenderedFramebuffer - 1;
         if (prevFrame < 0) {
             prevFrame = 2;
@@ -1376,7 +1382,7 @@ void render_wario_stadium(struct UnkStruct_800DC5EC* arg0) {
                 gfx_texture_cache_invalidate(gWSTexture683118);
                 break;
         }
-#endif
+        }
     }
 }
 

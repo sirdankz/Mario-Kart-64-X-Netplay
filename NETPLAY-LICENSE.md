@@ -2,7 +2,7 @@
 
 Copyright (c) 2026 sirdankz
 
-The original netplay and crossplay code added by sirdankz to this fork is licensed under the GNU General Public License, version 3 only (`GPL-3.0-only`).
+The original netplay and crossplay code added by sirdankz to this fork remains available under the GNU General Public License, version 3 only (`GPL-3.0-only`). To the extent sirdankz owns or has sufficient rights to license these original contributions, they are also offered under the Mozilla Public License, version 2.0 (`MPL-2.0`) as an additional option.
 
 ## Scope
 
@@ -39,3 +39,8 @@ A verbatim copy of GNU GPL version 3 is included in `COPYING.NETPLAY`. If this s
 This license grants no rights to Nintendo game content, ROM data, textures, audio, characters, trademarks, or other third-party copyrighted material.
 
 No Mario Kart 64 ROM is included with this project.
+
+
+## Additional MPL-2.0 grant
+
+The GPL-3.0-only grant above remains valid for covered code previously licensed under it. Sirdankz's own original copyrightable netplay and crossplay contributions are additionally offered under MPL-2.0; recipients may choose between these grants for Sirdankz-owned portions, while complying with all applicable upstream licenses. This does not grant MPL rights in third-party portions of mixed files. The full MPL text is in `COPYING.SIRDANKZ-MPL-2.0` and its scope is in `SIRDANKZ-CODE-LICENSE.md`.

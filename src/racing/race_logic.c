@@ -25,6 +25,13 @@
 #include "math.h"
 #include "menus.h"
 
+#if defined(TARGET_XBOX)
+#include "xbox_netplay.h"
+#endif
+#if defined(TARGET_XBOX)
+#include "xbox_netplay.h"
+#endif
+
 #pragma intrinsic(sqrtf)
 
 extern s16 gPlayerBalloonCount[];
@@ -499,6 +506,11 @@ void func_8028EEF0(s32 i) {
     gPlayers[i].type |= PLAYER_CINEMATIC_MODE;
 }
 
+#if defined(TARGET_XBOX)
+/* R73 prototypes must precede the finish callback in this C translation unit. */
+extern int xbox_netplay_solo_active(void);
+extern void xbox_netplay_solo_finish(int,int,int);
+#endif
 void func_8028EF28(void) {
     s16 currentPosition;
     s32 i;
@@ -522,6 +534,16 @@ void func_8028EF28(void) {
                     func_8028EEF0(i);
 
                     currentPosition = gPlayers[i].currentRank;
+#if defined(TARGET_XBOX)
+                    /* R73 observer: only P1 completed SOLO runs, no simulation mutation. */
+                    if(i==0 && !gDemoMode && xbox_netplay_solo_active()){
+                        if(gModeSelection==TIME_TRIALS)
+                            xbox_netplay_solo_finish(1,(int)gCurrentCourseId,
+                                (int)(gCourseTimer*1000.0f+0.5f));
+                        else if(gModeSelection==GRAND_PRIX)
+                            xbox_netplay_solo_finish(2,(int)gCurrentCourseId,(int)currentPosition);
+                    }
+#endif
                     gPlayers[i].type |= PLAYER_CPU;
 
                     if (currentPosition < 4) {
@@ -619,6 +641,24 @@ void func_8028EF28(void) {
             }
         }
     }
+    /* R57 online VS finish failsafe. Native 3P/4P advances state 4 only
+     * when a particular intermediate rank finishes. Online rank timing can
+     * legitimately skip that trigger. Once EVERY synchronized online racer
+     * has finished lap 3/cinematic mode, advance to the same results state. */
+#if defined(TARGET_XBOX)
+    if (xbox_netplay_active() && gModeSelection == VERSUS && D_800DC510 == 4) {
+        int netPlayers = xbox_netplay_player_count();
+        int finished = 0;
+        if (netPlayers > 4) netPlayers = 4;
+        if (netPlayers >= 3) {
+            for (i = 0; i < netPlayers; ++i) {
+                if (gPlayers[i].lapCount >= 3 || (gPlayers[i].type & PLAYER_CINEMATIC_MODE)) ++finished;
+            }
+            if (finished == netPlayers) { gDemoTimer = 180; D_800DC510 = 5; }
+        }
+    }
+#endif
+
     if ((D_802BA048 != 0) && (D_802BA048 != 100)) {
         D_802BA048 = 100;
         set_places_end_course_with_time();
@@ -807,6 +847,16 @@ void func_8028F970(void) {
                 func_800029B0();
             }
         }
+        /* MK64_R58_7_HOST_ONLY_PAUSE
+         * Online P1 is the authoritative host. Ignore synchronized START from
+         * guest logical players, while preserving stock offline multiplayer.
+         * gIsGamePaused therefore becomes 1 online, so the native pause menu
+         * also reads only gControllers[0] for resume/menu navigation. */
+#if defined(TARGET_XBOX)
+        if (xbox_netplay_active() && i != 0) {
+            continue;
+        }
+#endif
         if ((controller->buttonPressed & START_BUTTON) && (!(controller->button & R_TRIG)) &&
             (!(controller->button & L_TRIG))) {
             func_8028DF00();
@@ -888,6 +938,10 @@ void end_demo_update(void) {
     }
 }
 
+#if defined(TARGET_XBOX)
+/* R62: presentational Hub statistics observer, not deterministic simulation. */
+extern void xbox_netplay_r62_observe(int,int,int,int,int);
+#endif
 void func_8028FCBC(void) {
     Player* ply = &gPlayers[0];
     s32 i;
@@ -1065,6 +1119,25 @@ void func_8028FCBC(void) {
         case 7:
             break;
     }
+#if defined(TARGET_XBOX)
+    /* MK64_R62_RESULT_OBSERVER */
+    /* No game state is changed. Send a completed result once per race. */
+    if (gModeSelection == GRAND_PRIX || gModeSelection == VERSUS || gModeSelection == BATTLE) {
+        int r62_winner = (int)gPlayerWinningIndex;
+        if (gModeSelection == GRAND_PRIX) {
+            int r62_i, r62_best = 0;
+            /* GP has CPU racers; online head-to-head standings use the
+             * logical human racer slots only, not the CPU kart placements. */
+            for (r62_i=1;r62_i<(int)gPlayerCountSelection1 && r62_i<4;++r62_i)
+                if (gPlayers[r62_i].currentRank < gPlayers[r62_best].currentRank)
+                    r62_best=r62_i;
+            r62_winner=r62_best;
+        }
+        xbox_netplay_r62_observe((int)D_800DC510,(int)gModeSelection,(int)gCurrentCourseId,
+                            (int)gCourseIndexInCup,r62_winner);
+    }
+#endif
+
 }
 
 UNUSED void func_80290314(void) {

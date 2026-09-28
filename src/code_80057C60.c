@@ -44,6 +44,34 @@
 extern int xbox_netplay_active(void);
 extern int xbox_netplay_local_count(void);
 extern int xbox_netplay_local_slot(void);
+
+/*
+ * MK64_R44_OG_AUDIO_OWNERSHIP
+ * Map/view state remains synchronized. Only the local presentation ping is
+ * owner-gated so a remote R-C press does not play a UI cue on this Xbox.
+ */
+static int r44_local_rc_ping_owner(void) {
+    int first;
+    int count;
+    int i;
+
+    if (!xbox_netplay_active() || gGamestate != RACING) {
+        return 1;
+    }
+
+    first = xbox_netplay_local_slot();
+    count = xbox_netplay_local_count();
+    if (first < 0 || first >= NUM_PLAYERS || count < 1 || count > 2 || first + count > NUM_PLAYERS) {
+        return 1;
+    }
+
+    for (i = 0; i < count; ++i) {
+        if (gControllerOne[first + i].buttonPressed & R_CBUTTONS) {
+            return 1;
+        }
+    }
+    return 0;
+}
 #endif
 
 #define MAKE_RGB(r, g, b) (((r) << 0x10) | ((g) << 0x08) | (b << 0x00))
@@ -1428,6 +1456,9 @@ void func_80059C50(void) {
 }
 
 void func_80059D00(void) {
+    /* MK64_R65_OG_OFFLINE_60FPS_HUD_RNG_GATES: preserve stock 30Hz rates for controller
+     * entropy and split-screen lap HUD state; rendering remains 60Hz.
+     * The original 1P lap HUD guard is retained unchanged. */
 
     // 30Hz: func_8005A99C runs the ORIGINAL HUD-reveal countdown (D_8018D178, e.g. 150
     // frames = 5s in 1P GP, set in code_8006E9C0.c) that flips gIsHUDVisible when the race
@@ -1444,7 +1475,7 @@ void func_80059D00(void) {
     if (D_801657AE == 0) {
         switch (gScreenModeSelection) {
             case SCREEN_MODE_1P:
-                randomize_seed_from_controller(PLAYER_ONE);
+                if (gRun30hz) { randomize_seed_from_controller(PLAYER_ONE); }
                 if (D_8018D214 == 0) {
                     func_80059820(PLAYER_ONE);
                     func_8005B914();
@@ -1476,17 +1507,17 @@ void func_80059D00(void) {
                 }
                 break;
             case SCREEN_MODE_2P_SPLITSCREEN_VERTICAL:
-                randomize_seed_from_controller(PLAYER_ONE);
-                randomize_seed_from_controller(PLAYER_TWO);
+                if (gRun30hz) { randomize_seed_from_controller(PLAYER_ONE); }
+                if (gRun30hz) { randomize_seed_from_controller(PLAYER_TWO); }
                 func_80059820(PLAYER_ONE);
-                func_8005D0FC(PLAYER_ONE);
+                if (gRun30hz) { func_8005D0FC(PLAYER_ONE); }
                 if (!gDemoMode) {
                     func_8007AA44(0);
                 }
                 course_update_clouds(1);
                 func_8005D1F4(0);
                 func_80059820(PLAYER_TWO);
-                func_8005D0FC(PLAYER_TWO);
+                if (gRun30hz) { func_8005D0FC(PLAYER_TWO); }
                 if (!gDemoMode) {
                     func_8007AA44(1);
                 }
@@ -1495,17 +1526,17 @@ void func_80059D00(void) {
                 if (gRun30hz) { update_object(); }   // 30Hz: course critters (pure state, drawn in render path)
                 break;
             case SCREEN_MODE_2P_SPLITSCREEN_HORIZONTAL:
-                randomize_seed_from_controller(PLAYER_ONE);
-                randomize_seed_from_controller(PLAYER_TWO);
+                if (gRun30hz) { randomize_seed_from_controller(PLAYER_ONE); }
+                if (gRun30hz) { randomize_seed_from_controller(PLAYER_TWO); }
                 func_80059820(PLAYER_ONE);
-                func_8005D0FC(PLAYER_ONE);
+                if (gRun30hz) { func_8005D0FC(PLAYER_ONE); }
                 if (!gDemoMode) {
                     func_8007AA44(0);
                 }
                 course_update_clouds(3);
                 func_8005D1F4(0);
                 func_80059820(PLAYER_TWO);
-                func_8005D0FC(PLAYER_TWO);
+                if (gRun30hz) { func_8005D0FC(PLAYER_TWO); }
                 if (!gDemoMode) {
                     func_8007AA44(1);
                 }
@@ -1514,31 +1545,31 @@ void func_80059D00(void) {
                 if (gRun30hz) { update_object(); }   // 30Hz: course critters (pure state, drawn in render path)
                 break;
             case SCREEN_MODE_3P_4P_SPLITSCREEN:
-                randomize_seed_from_controller(PLAYER_ONE);
-                randomize_seed_from_controller(PLAYER_TWO);
-                randomize_seed_from_controller(PLAYER_THREE);
-                randomize_seed_from_controller(PLAYER_FOUR);
+                if (gRun30hz) { randomize_seed_from_controller(PLAYER_ONE); }
+                if (gRun30hz) { randomize_seed_from_controller(PLAYER_TWO); }
+                if (gRun30hz) { randomize_seed_from_controller(PLAYER_THREE); }
+                if (gRun30hz) { randomize_seed_from_controller(PLAYER_FOUR); }
                 func_80059820(PLAYER_ONE);
-                func_8005D0FC(PLAYER_ONE);
+                if (gRun30hz) { func_8005D0FC(PLAYER_ONE); }
                 if (!gDemoMode) {
                     func_8007AA44(0);
                 }
                 func_8005D1F4(0);
                 func_80059820(PLAYER_TWO);
-                func_8005D0FC(PLAYER_TWO);
+                if (gRun30hz) { func_8005D0FC(PLAYER_TWO); }
                 if (!gDemoMode) {
                     func_8007AA44(1);
                 }
                 func_8005D1F4(1);
                 func_80059820(PLAYER_THREE);
-                func_8005D0FC(PLAYER_THREE);
+                if (gRun30hz) { func_8005D0FC(PLAYER_THREE); }
                 if (!gDemoMode) {
                     func_8007AA44(2);
                 }
                 func_8005D1F4(2);
                 if (gPlayerCountSelection1 == 4) {
                     func_80059820(PLAYER_FOUR);
-                    func_8005D0FC(PLAYER_FOUR);
+                    if (gRun30hz) { func_8005D0FC(PLAYER_FOUR); }
                     if ((!gDemoMode) && (gPlayerCountSelection1 == 4)) {
                         func_8007AA44(3);
                     }
@@ -1719,7 +1750,15 @@ void func_8005A3C0(void) {
                 break;
         }
         if (b) {
+#if defined(TARGET_XBOX)
+            /*
+             * Always save the synchronized HUD/map state, but only play the
+             * global SOUND_ACTION_PING when this console owns the press.
+             */
+            func_8006F824(r44_local_rc_ping_owner());
+#else
             func_8006F824(1);
+#endif
         }
     }
 }

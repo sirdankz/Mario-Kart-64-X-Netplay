@@ -187,6 +187,7 @@ static void maple_init(void);
  * before the game asks. */
 void xbox_input_init(void) {
     maple_init();
+    xbox_controls_load();
 }
 
 static void maple_init(void) {
@@ -247,6 +248,352 @@ static int thumb_to_dc_y(SHORT v) {
     return -j;
 }
 
+/* MK64_R45_CONTROLS_PREMENU
+ *
+ * OG Xbox now uses the same controller-settings model as the 360 port:
+ *   - per-controller button rebinding
+ *   - left/right stick selection
+ *   - 5..40% dead zone
+ *   - 50..150% steering sensitivity
+ *   - physical D-pad also drives the analog stick in all 8 directions
+ *
+ * This translation occurs before netplay samples the local N64 pad, so it is
+ * purely local input configuration and never changes the wire protocol.
+ */
+typedef struct XboxControlProfile {
+    unsigned char bind[XBOX_CTRL_ACTIONS];
+    unsigned char stick;
+    unsigned char deadzone;
+    unsigned char sensitivity;
+} XboxControlProfile;
+
+static XboxControlProfile sControlProfile[4];
+static int sControlsLoaded = 0;
+static const char *sControlsPath = "D:\\mk64-controls.cfg";
+
+static const unsigned short sControlButtons[XBOX_CTRL_ACTIONS] = {
+    0x8000, 0x4000, 0x2000, 0x1000, 0x0020, 0x0010, 0x0800,
+    0x0400, 0x0200, 0x0100, 0x0008, 0x0004, 0x0002, 0x0001
+};
+
+static const char *sControlActions[XBOX_CTRL_ACTIONS] = {
+    "ACCELERATE / A", "BRAKE / B", "ITEM / Z", "START",
+    "L", "HOP / R", "DPAD UP", "DPAD DOWN",
+    "DPAD LEFT", "DPAD RIGHT", "C UP", "C DOWN", "C LEFT", "C RIGHT"
+};
+
+static const char *sControlSources[XBOX_CTRL_SOURCES] = {
+    "A", "B", "X", "Y", "WHITE", "BLACK", "LEFT TRIGGER", "RIGHT TRIGGER",
+    "BACK", "START", "L3", "R3", "DPAD UP", "DPAD DOWN", "DPAD LEFT", "DPAD RIGHT",
+    "RS UP", "RS DOWN", "RS LEFT", "RS RIGHT",
+    "LS UP", "LS DOWN", "LS LEFT", "LS RIGHT"
+};
+
+static unsigned int r45_fnv(const unsigned char *p, unsigned int n) {
+    unsigned int h = 2166136261U;
+    while (n--) h = (h ^ *p++) * 16777619U;
+    return h;
+}
+
+static void r45_control_defaults_one(XboxControlProfile *p) {
+    static const unsigned char d[XBOX_CTRL_ACTIONS] = {
+        XBOX_CTRL_SRC_A, XBOX_CTRL_SRC_B, XBOX_CTRL_SRC_LT, XBOX_CTRL_SRC_START,
+        XBOX_CTRL_SRC_WHITE, XBOX_CTRL_SRC_RT,
+        XBOX_CTRL_SRC_UP, XBOX_CTRL_SRC_DOWN, XBOX_CTRL_SRC_LEFT, XBOX_CTRL_SRC_RIGHT,
+        XBOX_CTRL_SRC_Y, XBOX_CTRL_SRC_RDOWN, XBOX_CTRL_SRC_RLEFT, XBOX_CTRL_SRC_X
+    };
+    memcpy(p->bind, d, sizeof(d));
+    p->stick = 0;
+    p->deadzone = 24;
+    p->sensitivity = 100;
+}
+
+static unsigned int r45_physical_down(const XINPUT_GAMEPAD *g) {
+    const BYTE TH = 0x40;
+    unsigned int down = 0;
+    if (g->bAnalogButtons[XINPUT_GAMEPAD_A] > TH)             down |= 1U << XBOX_CTRL_SRC_A;
+    if (g->bAnalogButtons[XINPUT_GAMEPAD_B] > TH)             down |= 1U << XBOX_CTRL_SRC_B;
+    if (g->bAnalogButtons[XINPUT_GAMEPAD_X] > TH)             down |= 1U << XBOX_CTRL_SRC_X;
+    if (g->bAnalogButtons[XINPUT_GAMEPAD_Y] > TH)             down |= 1U << XBOX_CTRL_SRC_Y;
+    if (g->bAnalogButtons[XINPUT_GAMEPAD_WHITE] > TH)         down |= 1U << XBOX_CTRL_SRC_WHITE;
+    if (g->bAnalogButtons[XINPUT_GAMEPAD_BLACK] > TH)         down |= 1U << XBOX_CTRL_SRC_BLACK;
+    if (g->bAnalogButtons[XINPUT_GAMEPAD_LEFT_TRIGGER] > TH)  down |= 1U << XBOX_CTRL_SRC_LT;
+    if (g->bAnalogButtons[XINPUT_GAMEPAD_RIGHT_TRIGGER] > TH) down |= 1U << XBOX_CTRL_SRC_RT;
+    if (g->wButtons & XINPUT_GAMEPAD_BACK)                    down |= 1U << XBOX_CTRL_SRC_BACK;
+    if (g->wButtons & XINPUT_GAMEPAD_START)                   down |= 1U << XBOX_CTRL_SRC_START;
+    if (g->wButtons & XINPUT_GAMEPAD_LEFT_THUMB)              down |= 1U << XBOX_CTRL_SRC_L3;
+    if (g->wButtons & XINPUT_GAMEPAD_RIGHT_THUMB)             down |= 1U << XBOX_CTRL_SRC_R3;
+    if (g->wButtons & XINPUT_GAMEPAD_DPAD_UP)                 down |= 1U << XBOX_CTRL_SRC_UP;
+    if (g->wButtons & XINPUT_GAMEPAD_DPAD_DOWN)               down |= 1U << XBOX_CTRL_SRC_DOWN;
+    if (g->wButtons & XINPUT_GAMEPAD_DPAD_LEFT)               down |= 1U << XBOX_CTRL_SRC_LEFT;
+    if (g->wButtons & XINPUT_GAMEPAD_DPAD_RIGHT)              down |= 1U << XBOX_CTRL_SRC_RIGHT;
+    if (g->sThumbRY > 16000)  down |= 1U << XBOX_CTRL_SRC_RUP;
+    if (g->sThumbRY < -16000) down |= 1U << XBOX_CTRL_SRC_RDOWN;
+    if (g->sThumbRX < -16000) down |= 1U << XBOX_CTRL_SRC_RLEFT;
+    if (g->sThumbRX > 16000)  down |= 1U << XBOX_CTRL_SRC_RRIGHT;
+    if (g->sThumbLY > 16000)  down |= 1U << XBOX_CTRL_SRC_LUP;
+    if (g->sThumbLY < -16000) down |= 1U << XBOX_CTRL_SRC_LDOWN;
+    if (g->sThumbLX < -16000) down |= 1U << XBOX_CTRL_SRC_LLEFT;
+    if (g->sThumbLX > 16000)  down |= 1U << XBOX_CTRL_SRC_LRIGHT;
+    return down;
+}
+
+static signed char r45_axis80(SHORT value, unsigned int deadzone) {
+    int threshold = (int)(deadzone * 32768U / 100U);
+    int v = (int)value;
+    int out;
+    if (v > -threshold && v < threshold) return 0;
+    if (v >= 0) out = (v * 80 + 16383) / 32767;
+    else out = -(((-v) * 80 + 16384) / 32768);
+    if (out < -80) out = -80;
+    if (out > 80) out = 80;
+    return (signed char)out;
+}
+
+static signed char r45_sensitivity(signed char analog, unsigned int sensitivity) {
+    int sign, mag, factor, value;
+    if (!analog || sensitivity == 100) return analog;
+    sign = analog < 0 ? -1 : 1;
+    mag = analog < 0 ? -(int)analog : (int)analog;
+    if (sensitivity < 100)
+        factor = (int)sensitivity + (100 - (int)sensitivity) * mag / 80;
+    else
+        factor = (int)sensitivity - ((int)sensitivity - 100) * mag / 80;
+    mag = (mag * factor + 50) / 100;
+    if (mag > 80) mag = 80;
+    value = sign * mag;
+    return (signed char)value;
+}
+
+void xbox_controls_load(void) {
+    unsigned char data[84];
+    DWORD got = 0;
+    HANDLE f;
+    int i, a;
+
+    if (sControlsLoaded) return;
+    sControlsLoaded = 1;
+    for (i = 0; i < 4; ++i) r45_control_defaults_one(&sControlProfile[i]);
+
+    f = CreateFileA(sControlsPath, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    if (f == INVALID_HANDLE_VALUE) return;
+    if (GetFileSize(f, NULL) != sizeof(data) ||
+        !ReadFile(f, data, sizeof(data), &got, NULL) ||
+        got != sizeof(data)) {
+        CloseHandle(f);
+        return;
+    }
+    CloseHandle(f);
+
+    if (memcmp(data, "MKOGCTL1", 8) != 0) return;
+    if (r45_fnv(data, 80) !=
+        ((unsigned int)data[80] << 24 | (unsigned int)data[81] << 16 |
+         (unsigned int)data[82] << 8 | (unsigned int)data[83])) return;
+
+    for (i = 0; i < 4; ++i) {
+        const unsigned char *q = data + 8 + i * 18;
+        for (a = 0; a < XBOX_CTRL_ACTIONS; ++a)
+            if (q[a] >= XBOX_CTRL_SOURCES && q[a] != XBOX_CTRL_UNBOUND) return;
+        if (q[14] > 1 || q[15] < 5 || q[15] > 40 || q[16] < 50 || q[16] > 150) return;
+    }
+
+    for (i = 0; i < 4; ++i) {
+        const unsigned char *q = data + 8 + i * 18;
+        memcpy(sControlProfile[i].bind, q, XBOX_CTRL_ACTIONS);
+        sControlProfile[i].stick = q[14];
+        sControlProfile[i].deadzone = q[15];
+        sControlProfile[i].sensitivity = q[16];
+    }
+}
+
+int xbox_controls_save(void) {
+    unsigned char data[84];
+    unsigned int sum;
+    DWORD written = 0;
+    HANDLE f;
+    int i;
+
+    xbox_controls_load();
+    memset(data, 0, sizeof(data));
+    memcpy(data, "MKOGCTL1", 8);
+    for (i = 0; i < 4; ++i) {
+        unsigned char *q = data + 8 + i * 18;
+        memcpy(q, sControlProfile[i].bind, XBOX_CTRL_ACTIONS);
+        q[14] = sControlProfile[i].stick;
+        q[15] = sControlProfile[i].deadzone;
+        q[16] = sControlProfile[i].sensitivity;
+        q[17] = 0;
+    }
+    sum = r45_fnv(data, 80);
+    data[80] = (unsigned char)(sum >> 24);
+    data[81] = (unsigned char)(sum >> 16);
+    data[82] = (unsigned char)(sum >> 8);
+    data[83] = (unsigned char)sum;
+
+    f = CreateFileA(sControlsPath, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
+                    FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH, NULL);
+    if (f == INVALID_HANDLE_VALUE) return 0;
+    if (!WriteFile(f, data, sizeof(data), &written, NULL) || written != sizeof(data)) {
+        CloseHandle(f);
+        return 0;
+    }
+    CloseHandle(f);
+    return 1;
+}
+
+const char *xbox_control_action(int action) {
+    return (action >= 0 && action < XBOX_CTRL_ACTIONS) ? sControlActions[action] : "";
+}
+
+const char *xbox_control_binding(int player, int action) {
+    unsigned int b;
+    xbox_controls_load();
+    if (player < 0 || player >= 4 || action < 0 || action >= XBOX_CTRL_ACTIONS) return "";
+    b = sControlProfile[player].bind[action];
+    return b < XBOX_CTRL_SOURCES ? sControlSources[b] : "UNBOUND";
+}
+
+void xbox_control_bind(int player, int action, int source) {
+    xbox_controls_load();
+    if (player >= 0 && player < 4 && action >= 0 && action < XBOX_CTRL_ACTIONS &&
+        ((source >= 0 && source < XBOX_CTRL_SOURCES) || source == XBOX_CTRL_UNBOUND))
+        sControlProfile[player].bind[action] = (unsigned char)source;
+}
+
+void xbox_control_defaults(int player) {
+    xbox_controls_load();
+    if (player >= 0 && player < 4) r45_control_defaults_one(&sControlProfile[player]);
+}
+
+int xbox_control_stick(int player, int change) {
+    xbox_controls_load();
+    if (player < 0 || player >= 4) return 0;
+    if (change) sControlProfile[player].stick ^= 1;
+    return sControlProfile[player].stick;
+}
+
+int xbox_control_deadzone(int player, int change) {
+    int d;
+    xbox_controls_load();
+    if (player < 0 || player >= 4) return 24;
+    d = (int)sControlProfile[player].deadzone + change;
+    if (d < 5) d = 5;
+    if (d > 40) d = 40;
+    sControlProfile[player].deadzone = (unsigned char)d;
+    return d;
+}
+
+int xbox_control_sensitivity(int player, int change) {
+    int s;
+    xbox_controls_load();
+    if (player < 0 || player >= 4) return 100;
+    s = (int)sControlProfile[player].sensitivity + change;
+    if (s < 50) s = 50;
+    if (s > 150) s = 150;
+    sControlProfile[player].sensitivity = (unsigned char)s;
+    return s;
+}
+
+unsigned int xbox_controls_down(void) {
+    maple_device_t *dev = maple_enum_type(0, MAPLE_FUNC_CONTROLLER);
+    XINPUT_STATE xs;
+    if (!dev || !dev->h) return 0;
+    memset(&xs, 0, sizeof(xs));
+    if (XInputGetState(dev->h, &xs) != ERROR_SUCCESS) return 0;
+    return r45_physical_down(&xs.Gamepad);
+}
+
+int xbox_controls_read_n64(int port, uint16_t *buttons, int8_t *stick_x, int8_t *stick_y) {
+    maple_device_t *dev;
+    XINPUT_STATE xs;
+    const XINPUT_GAMEPAD *g;
+    const XboxControlProfile *p;
+    unsigned int phys;
+    unsigned short out = 0;
+    signed char sx, sy;
+    int a;
+    int left, right, up, down_d;
+
+    if (!buttons || !stick_x || !stick_y || port < 0 || port >= 4) return 0;
+    xbox_controls_load();
+    dev = maple_enum_type(port, MAPLE_FUNC_CONTROLLER);
+    if (!dev || !dev->h) return 0;
+    memset(&xs, 0, sizeof(xs));
+    if (XInputGetState(dev->h, &xs) != ERROR_SUCCESS) return 0;
+
+    g = &xs.Gamepad;
+    p = &sControlProfile[port];
+    phys = r45_physical_down(g);
+
+    for (a = 0; a < XBOX_CTRL_ACTIONS; ++a) {
+        unsigned int src = p->bind[a];
+        if (src < XBOX_CTRL_SOURCES && (phys & (1U << src)))
+            out |= sControlButtons[a];
+    }
+
+    if (p->stick) {
+        sx = r45_axis80(g->sThumbRX, p->deadzone);
+        sy = r45_axis80(g->sThumbRY, p->deadzone);
+    } else {
+        sx = r45_axis80(g->sThumbLX, p->deadzone);
+        sy = r45_axis80(g->sThumbLY, p->deadzone);
+    }
+    sx = r45_sensitivity(sx, p->sensitivity);
+    sy = r45_sensitivity(sy, p->sensitivity);
+
+    left = (phys & (1U << XBOX_CTRL_SRC_LEFT)) != 0;
+    right = (phys & (1U << XBOX_CTRL_SRC_RIGHT)) != 0;
+    up = (phys & (1U << XBOX_CTRL_SRC_UP)) != 0;
+    down_d = (phys & (1U << XBOX_CTRL_SRC_DOWN)) != 0;
+    if (left || right) sx = (signed char)(left == right ? 0 : (left ? -80 : 80));
+    if (up || down_d) sy = (signed char)(up == down_d ? 0 : (up ? 80 : -80));
+
+    *buttons = out;
+    *stick_x = sx;
+    *stick_y = sy;
+    return 1;
+}
+
+int xbox_controls_return_chord_pressed(void) {
+    static DWORD held_since[4] = {0, 0, 0, 0};
+    static unsigned char latched[4] = {0, 0, 0, 0};
+    DWORD now = GetTickCount();
+    int port;
+
+    for (port = 0; port < 4; ++port) {
+        maple_device_t *dev = maple_enum_type(port, MAPLE_FUNC_CONTROLLER);
+        XINPUT_STATE xs;
+        int chord = 0;
+        if (dev && dev->h) {
+            memset(&xs, 0, sizeof(xs));
+            if (XInputGetState(dev->h, &xs) == ERROR_SUCCESS) {
+                const XINPUT_GAMEPAD *g = &xs.Gamepad;
+                chord =
+                    (g->wButtons & XINPUT_GAMEPAD_LEFT_THUMB) &&
+                    (g->wButtons & XINPUT_GAMEPAD_RIGHT_THUMB) &&
+                    g->bAnalogButtons[XINPUT_GAMEPAD_LEFT_TRIGGER] > 0x40 &&
+                    g->bAnalogButtons[XINPUT_GAMEPAD_RIGHT_TRIGGER] > 0x40;
+            }
+        }
+
+        if (!chord) {
+            held_since[port] = 0;
+            latched[port] = 0;
+            continue;
+        }
+        if (!held_since[port]) held_since[port] = now;
+        if (!latched[port] && now - held_since[port] >= 400U) {
+            latched[port] = 1;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* MK64_R62_3_RIGHT_TRIGGER_STATS */
+/* UI-only trigger state: never map it into gameplay controller bits. */
+static int sMk64UiRightTriggerDown = 0;
+int xbox_ui_right_trigger_down(void) { return sMk64UiRightTriggerDown; }
 void *maple_dev_status(maple_device_t *dev) {
     if (!dev || !dev->h) return NULL;
 
@@ -261,6 +608,7 @@ void *maple_dev_status(maple_device_t *dev) {
     /* Xbox face buttons are pressure-sensitive; treat anything past the
      * midpoint as pressed, which is what the digital DC buttons reported. */
     const BYTE TH = 0x40;
+    if (dev->port == 0) sMk64UiRightTriggerDown = (g->bAnalogButtons[XINPUT_GAMEPAD_RIGHT_TRIGGER] > TH);
     if (g->bAnalogButtons[XINPUT_GAMEPAD_A] > TH) s->buttons |= CONT_A;
     if (g->bAnalogButtons[XINPUT_GAMEPAD_B] > TH) s->buttons |= CONT_B;
     if (g->bAnalogButtons[XINPUT_GAMEPAD_X] > TH) s->buttons |= CONT_X;
@@ -271,6 +619,12 @@ void *maple_dev_status(maple_device_t *dev) {
     if (g->wButtons & XINPUT_GAMEPAD_DPAD_DOWN)  s->buttons |= CONT_DPAD_DOWN;
     if (g->wButtons & XINPUT_GAMEPAD_DPAD_LEFT)  s->buttons |= CONT_DPAD_LEFT;
     if (g->wButtons & XINPUT_GAMEPAD_DPAD_RIGHT) s->buttons |= CONT_DPAD_RIGHT;
+
+    /* MK64_R59_WORLD_CHAT_RS: pre-game UI-only hotkey. CONT_D is otherwise
+     * unused by MK64's OG controller mapping, so this never changes race input. */
+    if (g->wButtons & XINPUT_GAMEPAD_RIGHT_THUMB) s->buttons |= CONT_D;
+    if (g->wButtons & XINPUT_GAMEPAD_LEFT_THUMB)  s->buttons |= CONT_LTHUMB;
+    if (g->wButtons & XINPUT_GAMEPAD_RIGHT_THUMB) s->buttons |= CONT_RTHUMB;
 
 #if MK64X_DEBUG_TOOLS
     /* WHITE arms a one-shot dump, on the rising edge only so holding the button

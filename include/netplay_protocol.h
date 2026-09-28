@@ -1,5 +1,5 @@
 // Copyright (c) 2026 sirdankz
-// SPDX-License-Identifier: GPL-3.0-only
+// SPDX-License-Identifier: MPL-2.0
 // See NETPLAY-LICENSE.md for license scope.
 #ifndef MK64_NETPLAY_PROTOCOL_H
 #define MK64_NETPLAY_PROTOCOL_H
@@ -15,6 +15,7 @@
  *
  * Clients send only their reserved racers' delayed input history to the host.
  * The host relays authoritative all-player frame sets back to every client.
+ * R57 may also send guest input directly guest-to-guest; host relay stays enabled and the host can choose delay from proven direct-path measurements.
  * Every machine runs the same deterministic simulation in lockstep.
  *
  * Wire encoding is explicit: never transmit native structures or pointers.
@@ -23,17 +24,31 @@ namespace mknet {
 
 enum {
     VERSION=10,
-    BUILD=0xBA100922,
+    BUILD=0xBE100927,
+    VERSION_60=11,
+    BUILD_60=0xBE610928,
     /* BA10: 360-host state sync remains authoritative through race loading/countdown; race hash begins only at RACE_IN_PROGRESS. */
     HEADER=28,
     HISTORY=256,
     REDUNDANCY=24,
     MAX_DELAY=12,
+    REDUNDANCY_60=48,
+    MAX_DELAY_60=24,
     MAX_PLAYERS=8,
     CROSS_STATE_BYTES=1440,
     MAX_PACKET=1536
 };
 
+/* MK64_R66_OG_60HZ_NETPLAY. V10 remains bit-for-bit wire-compatible at 30Hz; V11 is OG-only.
+ * Never accept 30Hz and 60Hz inputs in the same simulation timeline. */
+inline bool &rate60_flag(){static bool value=false;return value;}
+inline bool rate60(){return rate60_flag();}
+inline void set_rate60(bool on){rate60_flag()=on;}
+inline unsigned redundancy(){return rate60()?REDUNDANCY_60:REDUNDANCY;}
+inline unsigned max_delay(){return rate60()?MAX_DELAY_60:MAX_DELAY;}
+inline unsigned nominal_fps(){return rate60()?60U:30U;}
+inline uint32_t wire_build(){return rate60()?uint32_t(BUILD_60):uint32_t(BUILD);}
+inline unsigned wire_version(){return rate60()?VERSION_60:VERSION;}
 /* Separate wire signatures prevent a 2-4 lobby accepting a 4-8 client. */
 inline unsigned &lobby_capacity(){static unsigned value=4;return value;}
 /* A two-controller reservation is atomic, including handshake restarts. */
@@ -54,7 +69,12 @@ enum Type {
     BOOT_READY,
     BOOT_GO,
     JOIN_REJECT,
-    STATE_SYNC
+    STATE_SYNC,
+    /* R56A: optional guest-to-guest direct mesh. Existing host relay remains fallback. */
+    PEER_INFO,
+    PEER_PROBE,
+    /* R57: guest reports measured direct peer RTT budget to the host. */
+    MESH_REPORT
 };
 
 struct Pad {
@@ -81,17 +101,17 @@ inline Pad decode_pad(const uint8_t *p) {
 inline int header(uint8_t *p,Type t,const uint8_t session[16],int payload) {
     memset(p,0,HEADER);
     memcpy(p,wire_magic(),4);
-    p[4]=VERSION;
+    p[4]=uint8_t(wire_version());
     p[5]=uint8_t(t);
     p[6]=uint8_t((HEADER+payload)>>8);
     p[7]=uint8_t(HEADER+payload);
-    put32(p+8,uint32_t(BUILD));
+    put32(p+8,wire_build());
     memcpy(p+12,session,16);
     return HEADER+payload;
 }
 
 inline bool valid(const uint8_t *p,int n) {
-    if(n<(int)HEADER||n>(int)MAX_PACKET||memcmp(p,wire_magic(),4)||p[4]!=VERSION||get32(p+8)!=(uint32_t)BUILD)return false;
+    if(n<(int)HEADER||n>(int)MAX_PACKET||memcmp(p,wire_magic(),4)||p[4]!=wire_version()||get32(p+8)!=wire_build())return false;
     if((int(p[6])*256+p[7])!=n)return false;
     int payload=n-HEADER;
     const uint8_t *q=p+HEADER;
@@ -110,7 +130,7 @@ inline bool valid(const uint8_t *p,int n) {
         return payload==24 && q[20]>=1 && q[22]<=1 && unsigned(q[20])+q[22]<lobby_capacity() &&
                (q[23]==PLATFORM_OG_XBOX || q[23]==PLATFORM_XBOX360);
     case START:
-        return payload==6 && q[3]<=1 && q[4]<=1 && q[5]<=1 && (!q[3] || q[4]) && q[0]>=2 && q[0]<=MAX_DELAY &&
+        return payload==6 && q[3]<=1 && q[4]<=1 && q[5]<=1 && (!q[3] || q[4]) && q[0]>=2 && q[0]<=max_delay() &&
                q[1]>=2 && q[1]<=lobby_capacity() &&
                q[2]>=1 && q[2]+q[3]<q[1];
     case START_ACK:
@@ -120,17 +140,28 @@ inline bool valid(const uint8_t *p,int n) {
         unsigned slot=q[0],count=q[1];
         /* Slot 0 is valid in 2P when the host sends its early input
          * directly to the guest. */
-        return q[3]<=1 && slot+q[3]<lobby_capacity()&&count>0&&count<=REDUNDANCY&&
+        return q[3]<=1 && slot+q[3]<lobby_capacity()&&count>0&&count<=redundancy()&&
                payload==16+4*int(count)*int(q[3]+1);
     }
     case FRAMESET: {
         if(payload<24)return false;
         unsigned players=q[0],count=q[1];
-        return players>=2&&players<=lobby_capacity()&&count>0&&count<=REDUNDANCY&&
+        return players>=2&&players<=lobby_capacity()&&count>0&&count<=redundancy()&&
                payload==16+4*int(players)*int(count);
     }
     case STATE_SYNC:
         return payload==4+CROSS_STATE_BYTES;
+    case PEER_INFO:
+        /* start slot, local_count-1, IPv4, UDP port */
+        return payload==8 && q[0]>=1 && q[1]<=1 && unsigned(q[0])+q[1]<lobby_capacity() &&
+               (q[6] || q[7]);
+    case PEER_PROBE:
+        /* sender start slot, local_count-1, request/reply flag, reserved, timestamp */
+        return payload==8 && q[0]>=1 && q[1]<=1 && q[2]<=1 && unsigned(q[0])+q[1]<lobby_capacity();
+    case MESH_REPORT:
+        /* reporter slot, target slot, samples, direct flag, measured RTT budget */
+        return payload==8 && q[0]>=1 && q[1]>=1 && q[0]<lobby_capacity() && q[1]<lobby_capacity() &&
+               q[0]!=q[1] && q[2]<=0xFF && q[3]<=1;
     default:
         return false;
     }
@@ -165,10 +196,17 @@ struct Latency {
         mean=(7*mean+ms+4)/8;
         if(samples<0xFFFFU)++samples;
     }
-    unsigned budget() const {return mean+4*variation;}
+    /* R55 low-latency: three handshake samples are required before START,
+     * so a 2x variation margin is enough to avoid inflating the entire
+     * session by a full 30 Hz frame from one small jitter spike. */
+    unsigned budget() const {return mean+2*variation;}
 };
 inline unsigned input_delay(unsigned budget_ms) {
     /* 3P/4P keep the conservative host-relay budget. */
+    if(rate60()){
+        unsigned d=(budget_ms*60+999)/1000+4;
+        return d<4?4:d>MAX_DELAY_60?MAX_DELAY_60:d;
+    }
     unsigned d=(budget_ms*30+999)/1000+2;
     return d<2?2:d>MAX_DELAY?MAX_DELAY:d;
 }
@@ -176,6 +214,10 @@ inline unsigned input_delay_2p(unsigned budget_ms) {
     /* Direct host->guest early input means one WAN crossing is on the
      * critical path. Convert roughly one-way RTT to 30 Hz frames and keep
      * one extra safety frame. */
+    if(rate60()){
+        unsigned d=(budget_ms*60+1999)/2000+2;
+        return d<4?4:d>MAX_DELAY_60?MAX_DELAY_60:d;
+    }
     unsigned d=(budget_ms*30+1999)/2000+1;
     return d<2?2:d>MAX_DELAY?MAX_DELAY:d;
 }
@@ -183,6 +225,10 @@ inline unsigned input_delay_early_relay(unsigned worst_ms,unsigned second_ms) {
     /* With 3P/4P early relay, the longest guest-to-guest path is approximately
      * guest A -> host -> guest B: half of each peer's host RTT budget. */
     unsigned path_ms=(worst_ms+second_ms+1)/2;
+    if(rate60()){
+        unsigned d=(path_ms*60+999)/1000+2;
+        return d<4?4:d>MAX_DELAY_60?MAX_DELAY_60:d;
+    }
     unsigned d=(path_ms*30+999)/1000+1;
     return d<2?2:d>MAX_DELAY?MAX_DELAY:d;
 }
@@ -209,7 +255,7 @@ struct Stream4 {
 
     void reset(unsigned d,unsigned p,unsigned slot,unsigned locals=1) {
         memset(this,0,sizeof(*this));
-        if(d<2||d>MAX_DELAY||p<2||p>MAX_PLAYERS||locals<1||locals>2||slot+locals>p){fault=true;return;}
+        if(d<2||d>max_delay()||p<2||p>MAX_PLAYERS||locals<1||locals>2||slot+locals>p){fault=true;return;}
         delay=d;
         players=p;
         local_slot=slot;local_count=locals;
@@ -281,13 +327,13 @@ struct Stream4 {
 
     int client_packet(uint8_t *p,const uint8_t session[16],unsigned target_slot=0) {
         if(fault||target_slot>=players||target_slot==local_slot)return 0;
-        uint32_t first=latest_local>=REDUNDANCY-1?latest_local-(REDUNDANCY-1):0;
+        uint32_t first=latest_local>=redundancy()-1?latest_local-(redundancy()-1):0;
         /* A peer's frame is the next input it needs, not a receipt timestamp.
          * Replay from that frame when a gap falls outside the usual tail. */
         if(peer_frame[target_slot]<first)first=peer_frame[target_slot];
         if(latest_local-first>=HISTORY){fault=true;return 0;}
         unsigned count=latest_local-first+1;
-        if(count>REDUNDANCY)count=REDUNDANCY;
+        if(count>redundancy())count=redundancy();
         int n=header(p,CLIENT_INPUT,session,16+count*4*local_count);
         uint8_t *q=p+HEADER;
         q[0]=uint8_t(local_slot);
@@ -318,11 +364,11 @@ struct Stream4 {
 
         unsigned count=q[1];
         uint32_t first=get32(q+4),hf=get32(q+8);
-        if(first>0x7FFFFF00U||hf>frame+HISTORY-1||first+count-1>frame+delay+REDUNDANCY)return false;
+        if(first>0x7FFFFF00U||hf>frame+HISTORY-1||first+count-1>frame+delay+redundancy())return false;
 
         for(unsigned i=0;i<count;++i) {
             uint32_t f=first+i;
-            if(f<frame||f>frame+delay+REDUNDANCY)continue;
+            if(f<frame||f>frame+delay+redundancy())continue;
             for(unsigned j=0;j<owned_count;++j){
                 InputSlot &s=inputs[expected_slot+j][f%HISTORY];
                 Pad a=decode_pad(q+16+(i*owned_count+j)*4);
@@ -345,12 +391,12 @@ struct Stream4 {
 
     int frameset_packet(uint8_t *p,const uint8_t session[16],unsigned target_slot=1) {
         update_complete();
-        uint32_t first=latest_complete>=REDUNDANCY-1?latest_complete-(REDUNDANCY-1):0;
+        uint32_t first=latest_complete>=redundancy()-1?latest_complete-(redundancy()-1):0;
         if(target_slot==0||target_slot>=players)return 0;
         if(peer_frame[target_slot]<first)first=peer_frame[target_slot];
         if(latest_complete-first>=HISTORY){fault=true;return 0;}
         unsigned count=latest_complete-first+1;
-        if(count>REDUNDANCY)count=REDUNDANCY;
+        if(count>redundancy())count=redundancy();
         int n=header(p,FRAMESET,session,16+count*players*4);
         uint8_t *q=p+HEADER;
         q[0]=uint8_t(players);
@@ -381,14 +427,14 @@ struct Stream4 {
 
         unsigned count=q[1];
         uint32_t first=get32(q+4),hf=get32(q+8);
-        if(first>0x7FFFFF00U||hf>frame+HISTORY-1||first+count-1>frame+delay+REDUNDANCY)return false;
+        if(first>0x7FFFFF00U||hf>frame+HISTORY-1||first+count-1>frame+delay+redundancy())return false;
 
         const uint8_t *in=q+16;
         for(unsigned i=0;i<count;++i) {
             uint32_t f=first+i;
             for(unsigned s=0;s<players;++s) {
                 Pad a=decode_pad(in);in+=4;
-                if(f<frame||f>frame+delay+REDUNDANCY)continue;
+                if(f<frame||f>frame+delay+redundancy())continue;
                 InputSlot &dst=inputs[s][f%HISTORY];
                 if(dst.present&&dst.frame==f&&!equal(dst.pad,a)){fault=true;return false;}
                 dst.present=true;dst.frame=f;dst.pad=a;

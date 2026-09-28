@@ -11,6 +11,10 @@
 #include "math_util_2.h"
 #include <sounds.h>
 #include "audio/external.h"
+#if defined(TARGET_XBOX)
+/* Music sequence players 0/1; keep player 2 (effects) untouched. */
+extern int xbox_music_enabled(void);
+#endif
 #include "audio/load.h"
 #undef dma_copy
 #undef internal_dma_copy
@@ -23,8 +27,55 @@
 /* MK64 R33 OG local-listener audio.  These are read-only presentation helpers;
  * they do not alter synchronized game state. */
 extern int xbox_netplay_active(void);
+extern int xbox_netplay_player_count(void);
 extern int xbox_netplay_local_slot(void);
 extern int xbox_netplay_local_count(void);
+
+/*
+ * MK64_R44_OG_AUDIO_OWNERSHIP
+ *
+ * Audio listeners are LOCAL presentation. The synchronized race still simulates
+ * every racer, but this OG Xbox mixes from its own network slot(s).
+ */
+static int r44_audio_player(void) {
+    int players;
+    int slot;
+    if (!xbox_netplay_active() || gGamestate != RACING) {
+        return -1;
+    }
+    players = xbox_netplay_player_count();
+    slot = xbox_netplay_local_slot();
+    if (players < 2 || players > NUM_PLAYERS || slot < 0 || slot >= players) {
+        return -1;
+    }
+    return slot;
+}
+
+static int r44_audio_count(void) {
+    int first = r44_audio_player();
+    int count;
+    int players;
+    if (first < 0) {
+        return 1;
+    }
+    count = xbox_netplay_local_count();
+    players = xbox_netplay_player_count();
+    if (count < 1 || count > 2 || first + count > players) {
+        return 1;
+    }
+    return count;
+}
+
+static int r44_audio_is_local(int player) {
+    int first = r44_audio_player();
+    int count = r44_audio_count();
+    return first >= 0 && player >= first && player < first + count;
+}
+
+static int r44_audio_secondary(int player) {
+    int first = r44_audio_player();
+    return first >= 0 && r44_audio_is_local(player) && player != first;
+}
 
 #define PLAYER_SOUND_DEBUGGING 1
 
@@ -435,7 +486,17 @@ void func_800C1F8C(void) {
     u8 cameraId = 0;
     Camera** camera = NULL;
 
-    var_a1 = D_800EA1C0 + 1;
+    /*
+     * R44: listener zero is this console's first local network racer.
+     */
+    if (r44_audio_player() >= 0) {
+        int first = r44_audio_player();
+        for (cameraId = 0; cameraId < (u8) r44_audio_count(); ++cameraId) {
+            gCopyCamera[cameraId] = &camera1[first + cameraId];
+        }
+    }
+
+    var_a1 = (r44_audio_player() >= 0) ? (u8) r44_audio_count() : (u8) (D_800EA1C0 + 1);
     for (var_s1 = 0; var_s1 < var_a1; var_s1++) {
         gVelocityCamera[var_s1][0] = gCopyCamera[var_s1]->pos[0] - gCameraLastPos[var_s1][0];
         gVelocityCamera[var_s1][2] = gCopyCamera[var_s1]->pos[2] - gCameraLastPos[var_s1][2];
@@ -459,11 +520,14 @@ void func_800C1F8C(void) {
             D_8018FB90 = var_s1;
         } else {
             cameraId = D_8018EFD8[var_s1].cameraId;
+            if (r44_audio_player() >= 0 && cameraId >= (u8) r44_audio_count()) {
+                cameraId = 0;
+            }
             // Why? Why would you do it this way? For what possible reason?
             camera = &gCopyCamera[cameraId];
             func_800C1DA4(*camera, (*camera)->rot, &D_8018EFD8[var_s1]);
             if (D_800EA1C8 != D_8018EFD8[var_s1].velX) {
-                func_800C1E2C(*camera, gVelocityCamera[0], &D_8018EFD8[var_s1]);
+                func_800C1E2C(*camera, gVelocityCamera[cameraId], &D_8018EFD8[var_s1]);
             }
             var_a1 = var_s1;
         }
@@ -512,7 +576,7 @@ void func_800C2274(u8 player) {
 
     var_a2 = 0xF;
     if (gSequencePlayers[player].enabled != 0) {
-        switch (gScreenModeSelection) { /* irregular */
+        switch (r44_audio_player() >= 0 ? r44_audio_count() - 1 : gScreenModeSelection) { /* audio layout */
             case 0:
                 break;
             case 1:
@@ -648,7 +712,12 @@ void func_800C284C(u8 arg0, u8 arg1, u8 arg2, u16 arg3) {
     func_800CBBB8(0x82000000 | (((u32) arg0 & 0xFF) << 0x10) | (((u32) arg1 & 0xFF) << 8), arg3);
     D_801930D0[arg0].unk_248 = arg1 | (arg2 << 8);
     if (D_801930D0[arg0].unk_000 != 1.0f) {
+        #if defined(TARGET_XBOX)
+        func_800CBB88(0x41000000 | (((u32) arg0 & 0xFF) << 0x10),
+            (arg0<2 && !xbox_music_enabled())?0.0f:D_801930D0[arg0].unk_000);
+#else
         func_800CBB88(0x41000000 | (((u32) arg0 & 0xFF) << 0x10), D_801930D0[arg0].unk_000);
+#endif
     }
     D_801930D0[arg0].unk_028 = 0;
     D_801930D0[arg0].unk_018 = 0;
@@ -893,6 +962,9 @@ void func_800C2A2C(u32 cmd) {
         case 15:
             seqId = cmd & 0xFF;
             subArgs = (cmd & 0xFF00) >> 8;
+            if (r44_audio_player() >= 0) {
+                subArgs = (u8) (r44_audio_count() - 1);
+            }
             D_800EA1C0 = subArgs;
             // this is *probably* why the music doesn't reset for battle mode
             // but that's just a guess
@@ -979,6 +1051,15 @@ void func_800C36C4(u8 arg0, u8 arg1, u8 arg2, u8 arg3) {
     D_801930D0[arg0].unk_012 = 1;
 }
 
+#if defined(TARGET_XBOX)
+/* Force an immediate recalculation after changing the music option. */
+void xbox_music_notify_changed(void){
+    /* Settings are changed in the premenu, potentially before audio is initialized.
+     * Defer application safely to the normal audio update. */
+    D_801930D0[0].unk_012=1;
+    D_801930D0[1].unk_012=1;
+}
+#endif
 void func_800C3724(void) {
     u8 seqPlayerIndex;
     f32 volume = 0.0f;
@@ -1028,6 +1109,9 @@ void func_800C3724(void) {
                 volume *= D_801930D0[seqPlayerIndex].unk_00E[j] / 127.0f;
             }
 
+#if defined(TARGET_XBOX)
+            if(seqPlayerIndex<2 && !xbox_music_enabled())volume=0.0f;
+#endif
             func_800C3448(0x40000000 | (((u8) seqPlayerIndex) << 0x18) |
                           (((u8) D_801930D0[seqPlayerIndex].unk_011) << 0x10) | ((u16) (u8) (volume * 127.0f)));
 
@@ -1040,7 +1124,12 @@ void func_800C3724(void) {
             } else {
                 D_801930D0[seqPlayerIndex].unk_000 = D_801930D0[seqPlayerIndex].unk_004;
             }
+#if defined(TARGET_XBOX)
+            func_800CBB88(0x41000000 | (((u32) seqPlayerIndex & 0xFF) << 0x10),
+                (seqPlayerIndex<2 && !xbox_music_enabled())?0.0f:D_801930D0[seqPlayerIndex].unk_000);
+#else
             func_800CBB88(0x41000000 | (((u32) seqPlayerIndex & 0xFF) << 0x10), D_801930D0[seqPlayerIndex].unk_000);
+#endif
         }
         if (D_801930D0[seqPlayerIndex].unk_014 != 0) {
             tempoCmd = D_801930D0[seqPlayerIndex].unk_014;
@@ -1266,9 +1355,9 @@ void play_sound(u32 soundBits, Vec3f* position, u8 cameraId, f32* arg3, f32* arg
      *   - remote racer emitters: suppress
      *   - global/UI/world emitters: always keep
      */
-    if (xbox_netplay_active() && gGamestate == RACING) {
-        int first = xbox_netplay_local_slot();
-        int count = xbox_netplay_local_count();
+    if (r44_audio_player() >= 0) {
+        int first = r44_audio_player();
+        int count = r44_audio_count();
         int source;
 
         if (first >= 0 && first < 8 && count > 0 && (first + count) <= 8) {
@@ -1864,7 +1953,8 @@ void sound_init(void) {
 
 void func_800C5BD0(void) {
     if (D_800EA1C0 == 0) {
-        func_800CBBE8(((D_800EA154[gPlayers[0].characterId] & 0xFFFF) << 8) | 0xF3000000, 0);
+        func_800CBBE8(((D_800EA154[gPlayers[r44_audio_player() >= 0 ? r44_audio_player() : 0].characterId] & 0xFFFF)
+                         << 8) | 0xF3000000, 0);
     } else {
         func_800CBBE8(0xF3004D00, 0);
     }
@@ -2919,8 +3009,11 @@ void func_800C8C7C(u8 arg0) {
 
 void func_800C8CCC() {
     u8 var_s0 = 0;
+    u8 firstAudioPlayer = (u8) (r44_audio_player() >= 0 ? r44_audio_player() : 0);
+    u8 endAudioPlayer =
+        (u8) (r44_audio_player() >= 0 ? r44_audio_player() + r44_audio_count() : D_800EA1C0 + 1);
 
-    for (var_s0 = 0; var_s0 < D_800EA1C0 + 1; var_s0++) {
+    for (var_s0 = firstAudioPlayer; var_s0 < endAudioPlayer; var_s0++) {
         func_800C5D04(var_s0);
         func_800C5E38(var_s0);
         func_800C6108(var_s0);
@@ -2932,7 +3025,7 @@ void func_800C8CCC() {
         func_800C847C(var_s0);
         func_800C86D8(var_s0);
     }
-    if (gModeSelection == GRAND_PRIX) {
+    if (gModeSelection == GRAND_PRIX || r44_audio_player() >= 0) {
         for (var_s0 = 0; var_s0 < 8; var_s0++) {
             func_800C8770(var_s0);
             func_800C8C7C(var_s0);
@@ -3005,6 +3098,10 @@ void func_800C9060(u8 playerId, u32 soundBits) {
 }
 
 void func_800C90F4(u8 playerId, u32 soundBits) {
+    if (r44_audio_player() >= 0 && !r44_audio_is_local(playerId)) {
+        func_800C92CC(playerId, soundBits - gPlayers[playerId].characterId * 0x10);
+        return;
+    }
     if (D_800EA108 == 0) {
         switch (D_800EA0EC[playerId]) {
             case 2:
@@ -3061,6 +3158,11 @@ void func_800C92CC(u8 playerId, u32 soundBits) {
 
 void func_800C94A4(u8 playerId) {
     u32 var_a0 = 0;
+
+    if (r44_audio_player() >= 0 && !r44_audio_is_local(playerId)) {
+        func_800C9A88(playerId);
+        return;
+    }
 
     if (D_800EA108 == 0) {
         switch (D_800EA0EC[playerId]) {
@@ -3155,6 +3257,10 @@ void func_800C94A4(u8 playerId) {
 }
 
 void func_800C97C4(u8 arg0) {
+    if (r44_audio_player() >= 0 && !r44_audio_is_local(arg0)) {
+        func_800C9D0C(arg0);
+        return;
+    }
     func_800C5578(&D_800E9F7C[arg0].pos, gPlayers[arg0].characterId + SOUND_ARG_LOAD(0x01, 0x04, 0xFF, 0x00));
     func_800C5578(&D_800E9F7C[arg0].pos, gPlayers[arg0].characterId + SOUND_ARG_LOAD(0x01, 0x04, 0xFF, 0x14));
     func_800C5578(&D_800E9F7C[arg0].pos, gPlayers[arg0].characterId + SOUND_ARG_LOAD(0x01, 0x04, 0xFF, 0x2E));
@@ -3328,8 +3434,28 @@ void func_800CA0E4(void) {
 }
 
 void func_800CA118(u8 arg0) {
+    if (r44_audio_player() >= 0 && !r44_audio_is_local(arg0)) {
+        return;
+    }
+
     D_800EA0EC[arg0] = 1;
     D_800E9EA4[arg0] = 1;
+
+    if (r44_audio_player() >= 0) {
+        int i;
+        int all = 1;
+        for (i = 0; i < r44_audio_count(); ++i) {
+            if (!D_800E9EA4[r44_audio_player() + i]) {
+                all = 0;
+            }
+        }
+        if (all) {
+            D_800EA0F0 = 1;
+            func_800CA0E4();
+        }
+        return;
+    }
+
     switch (D_800EA1C0) { /* irregular */
         case 0:
             D_800EA0F0 = 1;
@@ -3419,6 +3545,13 @@ void func_800CA49C_cue(u8 arg0) {
 
 void func_800CA49C(u8 arg0) {
     //printf("%s(%02x)\n", __func__, arg0);
+    if (r44_audio_player() >= 0 && !r44_audio_is_local(arg0)) {
+        return;
+    }
+    if (r44_audio_secondary(arg0)) {
+        func_800C9060(arg0, 0x1900FF3A);
+        return;
+    }
     if (D_800EA108 == 0) {
         // DC: 3/4P split-screen now plays course music (see func_8028EC98), so take the FULL
         // final-lap transition there too: sting (seq 0xC) + course music restarted sped up.
@@ -3445,13 +3578,19 @@ void func_800CA49C(u8 arg0) {
 
 void func_800CA59C(u8 playerId) {
     //printf("%s(%02x)\n", __func__, playerId);
+    if (r44_audio_player() >= 0 && !r44_audio_is_local(playerId)) {
+        func_800CA984(playerId);
+        return;
+    }
     if ((D_800EA0EC[playerId] == 0) && (D_800EA108 == 0)) {
 #if PLAYER_SOUND_DEBUGGING
         play_sound((gPlayers[playerId].characterId * 0x10) + 0x29008001, &D_800E9F7C[playerId].pos, playerId,
                    &D_800EA1D4, &D_800EA1D4, (s8*) &D_800E9F7C[playerId].unk_14);
 #endif
-                   D_800EA164 = 1;
-        if ((s32) D_800EA1C0 >= 2) {
+        if (!r44_audio_secondary(playerId)) {
+            D_800EA164 = 1;
+        }
+        if ((s32) D_800EA1C0 >= 2 || r44_audio_secondary(playerId)) {
             func_800C8F80(playerId, 0x0100FF2C);
         } else {
             func_800C3448(0x100100FF);
@@ -3475,6 +3614,10 @@ void func_800CA59C(u8 playerId) {
 
 void func_800CA730(u8 arg0) {
     //printf("%s(%02x)\n", __func__, arg0);
+    if (r44_audio_player() >= 0 && !r44_audio_is_local(arg0)) {
+        func_800CAACC(arg0);
+        return;
+    }
     if (D_800EA0EC[arg0] == 0) {
         if ((D_800EA108 == 0) && (D_800EA10C[arg0] != 0)) {
 #if PLAYER_SOUND_DEBUGGING
@@ -3482,13 +3625,14 @@ void func_800CA730(u8 arg0) {
                        &D_800E9F7C[arg0].pos, arg0, &D_800EA1D4, &D_800EA1D4, (s8*) &D_800E9F7C[arg0].unk_14);
 #endif
                        if (D_800EA10C[arg0] != 0) {
-                if ((s32) D_800EA1C0 >= 2) {
+                if ((s32) D_800EA1C0 >= 2 || r44_audio_secondary(arg0)) {
                     func_800C9018(arg0, SOUND_ARG_LOAD(0x01, 0x00, 0xFF, 0x2C));
                 } else {
                     D_800EA10C[arg0] = 0;
                     if (D_800EA104 != 0) {
                         func_800C9018(arg0, SOUND_ARG_LOAD(0x01, 0x00, 0xFF, 0x2C));
-                    } else if ((D_800EA10C[0] == 0) && (D_800EA10C[1] == 0)) {
+                    } else if (r44_audio_player() >= 0 ? D_800EA10C[r44_audio_player()] == 0
+                                                        : ((D_800EA10C[0] == 0) && (D_800EA10C[1] == 0))) {
                         if (D_8018FC08 != 0) {
                             if (((u32) (gSequencePlayers[1].enabled)) == 0) {
                                 func_800C3608(1, 5);
@@ -3569,7 +3713,8 @@ void func_800CAC08() {
 void func_800CAC60(UNUSED u8 arg0) {
     if ((D_800EA108 == 0) && (D_800EA0F0 == 0)) {
         play_sound(SOUND_ACTION_EXPLOSION_2, &D_800EA1C8, 0U, &D_800EA1D4, &D_800EA1D4, &D_800EA1DC);
-        if ((D_800EA10C[0] != 1) && (D_800EA10C[1] != 1)) {
+        if (r44_audio_player() >= 0 ? D_800EA10C[r44_audio_player()] != 1
+                                    : ((D_800EA10C[0] != 1) && (D_800EA10C[1] != 1))) {
             func_800C36C4(0, 1, 0x37U, 5);
             play_sound(SOUND_ITEM_THUNDERBOLT, &D_800EA1C8, 0U, &D_800EA1D4, &D_800EA1D4, &D_800EA1DC);
             D_800EA168 = 1;
@@ -3579,7 +3724,11 @@ void func_800CAC60(UNUSED u8 arg0) {
 
 void func_800CAD40(UNUSED s32 arg0) {
     if (D_800EA108 == 0) {
-        if ((D_800EA170[0] == 0) && (D_800EA170[1] == 0) && (D_800EA170[2] == 0) && (D_800EA170[3] == 0)) {
+        if (r44_audio_player() >= 0
+                ? (D_800EA170[r44_audio_player()] == 0 &&
+                   (r44_audio_count() == 1 || D_800EA170[r44_audio_player() + 1] == 0))
+                : ((D_800EA170[0] == 0) && (D_800EA170[1] == 0) &&
+                   (D_800EA170[2] == 0) && (D_800EA170[3] == 0))) {
             func_800C36C4(0, 1, 0x7FU, 0x19);
         }
         func_800C56F0(SOUND_ITEM_THUNDERBOLT);
@@ -3588,6 +3737,7 @@ void func_800CAD40(UNUSED s32 arg0) {
 }
 
 void func_800CADD0(u8 arg0, f32 arg1) {
+    if (r44_audio_player() >= 0 && !r44_audio_is_local(arg0)) return;
     if (D_800EA108 == 0) {
         switch (D_800EA0EC[arg0]) {
             case 2:
@@ -3613,6 +3763,7 @@ void func_800CADD0(u8 arg0, f32 arg1) {
 }
 
 void func_800CAEC4(u8 playerId, f32 arg1) {
+    if (r44_audio_player() >= 0 && !r44_audio_is_local(playerId)) return;
     if (D_800EA108 == 0) {
         switch (D_800EA0EC[playerId]) {
             case 2:
@@ -3638,6 +3789,7 @@ void func_800CAEC4(u8 playerId, f32 arg1) {
 }
 
 void func_800CAFC0(u8 arg0) {
+    if (r44_audio_player() >= 0 && !r44_audio_is_local(arg0)) return;
     if (D_800EA108 == 0) {
         switch (D_800EA0EC[arg0]) {
             case 2:
@@ -3654,6 +3806,7 @@ void func_800CAFC0(u8 arg0) {
 }
 
 void func_800CB064(u8 arg0) {
+    if (r44_audio_player() >= 0 && !r44_audio_is_local(arg0)) return;
     if (D_800EA108 == 0) {
         if (D_800EA170[arg0] == 1) {
             if ((u8) D_800EA168 == 0) {
