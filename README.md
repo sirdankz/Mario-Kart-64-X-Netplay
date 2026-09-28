@@ -7,6 +7,8 @@ The base port is a native Original Xbox port of the
 [Mario Kart 64 decompilation](https://github.com/n64decomp/mk64), built on
 [jnmartin84's Dreamcast port](https://github.com/jnmartin84/mario-kart-64-dc).
 
+Thanks to Team Resurgent for lots of testing, help, and tips!
+
 ## Netplay
 
 This fork adds online multiplayer support to the Original Xbox port and a shared
